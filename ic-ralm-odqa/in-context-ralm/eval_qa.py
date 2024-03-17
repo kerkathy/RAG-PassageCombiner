@@ -1,7 +1,5 @@
 # %%
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-
 import argparse
 import json
 import re
@@ -14,7 +12,6 @@ from ralm.file_utils import print_args
 from ralm.model_utils import load_model_and_tokenizer
 # %%
 
-
 def normalize_question(question):
     if not question.endswith("?"):
         question = question + "?"
@@ -22,7 +19,7 @@ def normalize_question(question):
     return question[0].lower() + question[1:]
 
 
-def build_qa_prompt(example, num_docs=1):
+def build_qa_prompt(example, num_docs=1, require_long=False):
     if num_docs == 0:
         question_text = normalize_question(example["question"])
         ex_prompt = f"Answer these questions:\nQ: {question_text}\nA:"
@@ -34,7 +31,10 @@ def build_qa_prompt(example, num_docs=1):
     else:
         q = normalize_question(example["question"])
         docs_text = "\n\n".join([f"{ctx['title']}\n\n{ctx['text']}" for ctx in example["ctxs"][:num_docs]])
-        ex_prompt = f"{docs_text}\n\nBased on these texts, answer these questions:\nQ: {q}\nA:"
+        if require_long:
+            ex_prompt = f"{docs_text}\n\nBased on these texts, answer these questions in full sentence, as completely as possible:\nQ: {q}\nA:"
+        else:
+            ex_prompt = f"{docs_text}\n\nBased on these texts, answer these questions:\nQ: {q}\nA:"
 
     return ex_prompt
 
@@ -86,9 +86,13 @@ def evaluate_dataset(
     num_has_answer = 0
     num_too_long = 0
     sample_prompt = None
+    id_pred_ans = []
     for ex in (tq := tqdm(eval_dataset, desc=f"EM:  0.0%")):
         answers = ex["answers"]
-        prompt = build_qa_prompt(ex, num_docs=num_docs)
+        if max_tokens_to_generate > 10:
+            prompt = build_qa_prompt(ex, num_docs=num_docs, require_long=True) # for some dataset like msmarcoqa, we need the generation to be longer
+        else:
+            prompt = build_qa_prompt(ex, num_docs=num_docs)
         if idx == 0:
             sample_prompt = prompt
         has_answer = text_has_answer(answers, prompt)
@@ -110,6 +114,11 @@ def evaluate_dataset(
             num_has_answer += 1
         tq.set_description(f"EM: {num_correct / idx * 100:4.1f}%")
 
+        if "_id" in ex:
+            id_pred_ans.append((ex["_id"], prediction, answers))
+        else:
+            id_pred_ans.append((idx, prediction, answers))
+
     em = num_correct / idx * 100
     has_answer = num_has_answer / idx * 100
     print(f"EM: {em:.1f}%")
@@ -121,6 +130,13 @@ def evaluate_dataset(
         if sample_prompt is not None:
             with open(os.path.join(output_dir, "example_prompt.txt"), "w") as f:
                 f.write(sample_prompt)
+        with open(os.path.join(output_dir, "prediction.json"), "w") as f:
+            for item in id_pred_ans:
+                f.write(json.dumps({"query_id": item[0], "answers": [item[1]]}) + "\n")
+        with open(os.path.join(output_dir, "gold_answers.json"), "w") as f:
+            for item in id_pred_ans:
+                f.write(json.dumps({"query_id": item[0], "answers": item[2]}) + "\n")
+        
 
 
 def load_dataset(dataset_path):
@@ -147,6 +163,7 @@ def main(args):
         max_length=model_max_length,
         num_docs=args.num_docs,
         output_dir=args.output_dir,
+        max_tokens_to_generate=args.max_tokens,
     )
 
 
@@ -161,6 +178,7 @@ if __name__ == '__main__':
     parser.add_argument("--auth_token", type=str, default=None)
     parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--num_docs", type=int, default=0)
+    parser.add_argument("--max_tokens", type=int, default=10)
 
     # Dataset params
     parser.add_argument("--dataset_path", type=str)

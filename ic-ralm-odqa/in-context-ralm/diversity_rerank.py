@@ -4,14 +4,18 @@ Rerank the ctxs based on diversity.
 """
 
 import os
+import sys
 import json
 import argparse
 from tqdm import tqdm
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from ralm.file_utils import print_args
 
+# global variables to store the similarity matrices
 similarity_matrices = {}
+query_similarity = {}
 
 def eq_1(x):
     epsilon = 1e-9  # a very small number
@@ -21,13 +25,29 @@ def eq_1(x):
         return False
 
 
-def custom_similarity(paragraphs, method="tfidf"):
+def custom_similarity(paragraphs, query=None, method="tfidf"):
+    """
+    Compute the similarity between paragraphs using the specified method.
+    Args:
+        paragraphs: list of strings
+        query: list of a string
+        method: str, one of "tfidf", "spacy"
+    Returns:
+        similarity_scores: list of lists, where similarity_scores[i][j] is the similarity score between paragraph i and j
+    """
     if method == "tfidf":
         vectorizer = TfidfVectorizer()
         score_matrix = vectorizer.fit_transform(paragraphs)
-        similarity_matrix = cosine_similarity(score_matrix)
+        if query is None:
+            similarity_scores = cosine_similarity(score_matrix)
+        else:
+            query_vector = vectorizer.transform([query])
+            similarity_scores = cosine_similarity(query_vector, score_matrix)
+        return similarity_scores
 
     elif method == "spacy":
+        if query is not None:
+            raise NotImplementedError("Query is not supported for spacy similarity.")
         nlp = spacy.load("en_core_web_lg")
         docs = [nlp(text) for text in paragraphs]
         similarity_matrix = [[doc1.similarity(doc2) for doc2 in docs] for doc1 in docs]
@@ -38,33 +58,10 @@ def custom_similarity(paragraphs, method="tfidf"):
     return similarity_matrix
 
 
-# def diversity_rerank(dataset, sim_method="tfidf", sim_threshold=0.5):
-#     for data in tqdm(dataset):
-#         reranked_ctxs = []
-#         similarity_matrix = custom_similarity([x["text"] for x in data["ctxs"]], method=sim_method)
-#         if not eq_1(sim_threshold):
-#             for i, ctx in enumerate(data["ctxs"]):
-#                 if i == 0:
-#                     reranked_ctxs.append({"pos": i, "content": ctx})
-#                 else:
-#                     too_similar = False
-#                     for item in reranked_ctxs:
-#                         sim_score = similarity_matrix[i][item["pos"]]
-#                         if sim_score > sim_threshold:
-#                             too_similar = True
-#                             break
-#                     if not too_similar:
-#                         reranked_ctxs.append({"pos": i, "content": ctx})
-#                         # if len(reranked_ctxs) == num_docs:
-#                         #     break
-
-#             # get rid of pos, and only keep content
-#             data["ctxs"] = [x["content"] for x in reranked_ctxs]
-
-#     return dataset
-
-
-def diversity_rerank(dataset, sim_method="tfidf", sim_threshold=0.5):
+def basic_rerank(dataset, sim_method, sim_threshold=0.5):
+    """
+    Greedily rerank the documents by removing the ones that are too similar to the ones already selected.
+    """
     for i, data in tqdm(enumerate(dataset)):
         reranked_ctxs = []
         if i not in similarity_matrices:
@@ -90,27 +87,86 @@ def diversity_rerank(dataset, sim_method="tfidf", sim_threshold=0.5):
     return dataset
 
 
+def mmr_rerank(dataset, sim_method, lambda_param):
+    """
+    Greedily rerank the documents using Maximal Marginal Relevance (MMR) algorithm.
+    In each iteration, select the document that has the highest MMR score
+    MMR score = lambda * similarity(query, document) - (1 - lambda) * max(similarity(document, selected))
+    """
+    for i, data in tqdm(enumerate(dataset)):
+        reranked_ctxs = []
+        ctx_texts = [x["text"] for x in data["ctxs"]]
+
+        # update and fetch global similarity matrices
+        if i not in similarity_matrices:
+            similarity_matrices[i] = custom_similarity(ctx_texts, method=sim_method)
+        if i not in query_similarity:
+            query_similarity[i] = custom_similarity(ctx_texts, query=data["question"], method=sim_method)
+        similarity_matrix = similarity_matrices[i]
+        query_sim = query_similarity[i]
+
+        # rerank the documents
+        while len(reranked_ctxs) < len(data["ctxs"]):
+            max_mmr_score = -1
+            max_mmr_pos = -1
+            for i, ctx in enumerate(data["ctxs"]):
+                if i in reranked_ctxs:
+                    continue
+                mmr_score = lambda_param * query_sim[0][i]
+                if reranked_ctxs != []:
+                    mmr_score -= (1 - lambda_param) * max([similarity_matrix[i][x] for x in reranked_ctxs])
+                if mmr_score > max_mmr_score:
+                    max_mmr_score = mmr_score
+                    max_mmr_pos = i
+            reranked_ctxs.append(max_mmr_pos)
+
+        # get rid of pos, and only keep content
+        data["ctxs"] = [data["ctxs"][x] for x in reranked_ctxs]
+
+    return dataset
+
+
 def load_json(file_path):
     with open(file_path, "r") as f:
         data = json.load(f)
     return data
 
 
+def check_output_file(output_file):
+    """
+    prompt the user to input yes/no if the file already exists
+    """
+    if os.path.exists(output_file):
+        overwrite = input(f"The file {output_file} already exists. Overwrite? (yes/no): ")
+        if overwrite.lower() != "yes":
+            print("Exiting...")
+            sys.exit(0)
+
+
 def main(args):
+    print_args(args)
+
     dataset = load_json(args.input_file)
 
-    for sim_threshold in args.sim_thresholds:
-        output_file = args.input_file.replace(".json", f"-reranked-{args.sim_method}-{sim_threshold}.json")
+    if args.algo == "basic":
+        assert args.sim_thresholds is not None, "Please provide the similarity thresholds for basic rerank."
+    else:
+        args.sim_thresholds = [1] # dummy value
 
-        # prompt the user to input yes/no if the file already exists
-        if os.path.exists(output_file):
-            overwrite = input(f"The file {output_file} already exists. Overwrite? (yes/no): ")
-            if overwrite.lower() != "yes":
-                print("Exiting...")
-                return
+    for sim_threshold in args.sim_thresholds:
+        if args.algo == "basic":
+            output_file = args.input_file.replace(".json", f"-reranked-{args.sim_method}-{sim_threshold}.json")
+        elif args.algo == "mmr":
+            output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{args.lambda_param}-{args.sim_method}-{sim_threshold}.json")
+        check_output_file(output_file)
 
         # Use the precalculated similarity matrix
-        reranked_dataset = diversity_rerank(dataset, args.sim_method, sim_threshold)
+        if args.algo == "basic":
+            reranked_dataset = basic_rerank(dataset, args.sim_method, sim_threshold)
+        elif args.algo == "mmr":
+            reranked_dataset = mmr_rerank(dataset, args.sim_method, args.lambda_param)
+        else:
+            raise NotImplementedError(f"Algorithm {args.algo} not implemented.")
 
         with open(output_file, "w") as f:
             json.dump(reranked_dataset, f, indent=4)
@@ -124,7 +180,13 @@ if __name__ == "__main__":
 
     # Rerank params
     parser.add_argument("--sim_method", type=str, choices=["tfidf", "spacy"], required=True)
-    parser.add_argument("--sim_thresholds", nargs='+', type=float, required=True)
+    parser.add_argument("--algo", type=str, choices=["basic", "mmr"], required=True)
+
+    # Basic rerank params
+    parser.add_argument("--sim_thresholds", nargs='+', type=float) # list of similarity thresholds e.g., 0.5, 0.6, 0.7
+
+    # MMR param
+    parser.add_argument("--lambda_param", type=float, default=0.5)
 
     args = parser.parse_args()
     main(args)
