@@ -1,0 +1,105 @@
+corpus: 
+threshold: 0.7
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.7/\n
+{'testlen': 59431, 'reflen': 193082, 'guess': [59431, 47002, 36531, 28430], 'correct': [31744, 13587, 6714, 3422]}
+ratio: 0.3078018665644633
+############################
+F1: 1.0
+Semantic_Similarity: 0.5845830460510933
+bleu_1: 0.05636226295504564
+bleu_2: 0.04146366949506708
+bleu_3: 0.03218585258609778
+bleu_4: 0.02550994381321269
+rouge_l: 0.21324486625158046
+############################
+----------------------------------------
+corpus: 
+threshold: 0.8
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.8/\n
+{'testlen': 59392, 'reflen': 193084, 'guess': [59392, 46966, 36513, 28424], 'correct': [31695, 13571, 6665, 3357]}
+ratio: 0.3075966936670035
+############################
+F1: 1.0
+Semantic_Similarity: 0.582874935238352
+bleu_1: 0.05619031687661201
+bleu_2: 0.04134702023795507
+bleu_3: 0.03202923616777168
+bleu_4: 0.025282856623713344
+rouge_l: 0.21292085939573102
+############################
+----------------------------------------
+corpus: 
+threshold: 0.5
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.5/\n
+{'testlen': 183932, 'reflen': 193361, 'guess': [183932, 171505, 160307, 150591], 'correct': [65165, 28135, 15700, 9586]}
+ratio: 0.9512362886000748
+############################
+F1: 1.0
+Semantic_Similarity: 0.6970231778792001
+bleu_1: 0.33658413900577494
+bleu_2: 0.2290341067175998
+bleu_3: 0.16962688057779435
+bleu_4: 0.13107345388606884
+rouge_l: 0.31398185506188475
+############################
+----------------------------------------
+corpus: 
+threshold: 0.6
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.6/\n
+{'testlen': 186104, 'reflen': 193417, 'guess': [186104, 173671, 162467, 152804], 'correct': [65158, 28008, 15568, 9441]}
+ratio: 0.9621905003179609
+############################
+F1: 1.0
+Semantic_Similarity: 0.6961443348172321
+bleu_1: 0.33662497556951854
+bleu_2: 0.22846396644471964
+bleu_3: 0.16878964300702276
+bleu_4: 0.13000610259656503
+rouge_l:    
+############################
+----------------------------------------
+corpus: 
+threshold: 0.7
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.7/\n
+{'testlen': 185287, 'reflen': 193357, 'guess': [185287, 172856, 161663, 152021], 'correct': [65137, 28081, 15700, 9579]}
+ratio: 0.9582637297847973
+############################
+F1: 1.0
+Semantic_Similarity: 0.6962056657954568
+bleu_1: 0.3365638891508046
+bleu_2: 0.22879165054425096
+bleu_3: 0.1694668246514986
+bleu_4: 0.13089975833337053
+rouge_l: 0.31234710876191374
+############################
+----------------------------------------
+corpus: 
+threshold: 0.8
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.8/\n
+{'testlen': 186747, 'reflen': 193369, 'guess': [186747, 174325, 163144, 153495], 'correct': [64934, 27877, 15501, 9388]}
+ratio: 0.9657545935491162
+############################
+F1: 1.0
+Semantic_Similarity: 0.6949079731723253
+bleu_1: 0.3355973737867459
+bleu_2: 0.2275896315703916
+bleu_3: 0.16809876733405635
+bleu_4: 0.12940263390605589
+rouge_l: 0.3113428747217457
+############################
+----------------------------------------
+corpus: 
+threshold: 0.9
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_msmarcoqa_docs_5/reranked_tfidf-0.9/\n
+{'testlen': 184439, 'reflen': 193375, 'guess': [184439, 172015, 160840, 151219], 'correct': [64770, 27873, 15507, 9422]}
+ratio: 0.9537892695539706
+############################
+F1: 1.0
+Semantic_Similarity: 0.6948851127200787
+bleu_1: 0.334564405541737
+bleu_2: 0.22726254337927781
+bleu_3: 0.16802839588688742
+bleu_4: 0.1295420735916822
+rouge_l: 0.31197442426534305
+############################
+----------------------------------------

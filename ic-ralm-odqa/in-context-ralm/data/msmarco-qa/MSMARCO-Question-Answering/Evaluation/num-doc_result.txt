@@ -1,0 +1,142 @@
+corpus: ms2
+dataset: dpr-trivia-test
+num_doc: 1
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_1/reranked_tfidf-0.5/\n
+{'testlen': 29941, 'reflen': 27749, 'guess': [29941, 18629, 11299, 7741], 'correct': [14473, 5508, 1696, 601]}
+ratio: 1.078993837615731
+############################
+F1: 1.0
+Semantic_Similarity: 0.3846138107413122
+bleu_1: 0.4833839885107216
+bleu_2: 0.3780492012951045
+bleu_3: 0.27786093727649547
+bleu_4: 0.2020179563479453
+rouge_l: 0.4938432845887373
+############################
+----------------------------------------
+num_doc: 2
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_2/reranked_tfidf-0.5/\n
+{'testlen': 29608, 'reflen': 27682, 'guess': [29608, 18298, 11013, 7458], 'correct': [14796, 5704, 1744, 615]}
+ratio: 1.0695758976952146
+############################
+F1: 1.0
+Semantic_Similarity: 0.3873037113215161
+bleu_1: 0.499729802755995
+bleu_2: 0.39468949921872953
+bleu_3: 0.2911056682317814
+bleu_4: 0.21237391864620064
+rouge_l: 0.506248091635337
+############################
+----------------------------------------
+num_doc: 3
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_3/reranked_tfidf-0.5/\n
+{'testlen': 29538, 'reflen': 27803, 'guess': [29538, 18227, 10968, 7401], 'correct': [14838, 5740, 1786, 638]}
+ratio: 1.0624033377692672
+############################
+F1: 1.0
+Semantic_Similarity: 0.3860613175293499
+bleu_1: 0.5023359739995767
+bleu_2: 0.3977365384546826
+bleu_3: 0.2953350539682138
+bleu_4: 0.21707950203755333
+rouge_l: 0.5073326736756927
+############################
+----------------------------------------
+num_doc: 4
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_4/reranked_tfidf-0.5/\n
+{'testlen': 29643, 'reflen': 27742, 'guess': [29643, 18336, 11106, 7560], 'correct': [14984, 5796, 1805, 646]}
+ratio: 1.0685242592458701
+############################
+F1: 1.0
+Semantic_Similarity: 0.3900611868015926
+bleu_1: 0.5054819012920249
+bleu_2: 0.39972811303208367
+bleu_3: 0.2961303873190351
+bleu_4: 0.21704006539887938
+rouge_l: 0.513559707186986
+############################
+----------------------------------------
+num_doc: 5
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_5/reranked_tfidf-0.5/\n
+{'testlen': 29966, 'reflen': 27939, 'guess': [29966, 18659, 11389, 7745], 'correct': [15111, 5867, 1816, 642]}
+ratio: 1.0725509144922483
+############################
+F1: 1.0
+Semantic_Similarity: 0.38987623874272986
+bleu_1: 0.5042715077087198
+bleu_2: 0.398195251701027
+bleu_3: 0.2934995693739806
+bleu_4: 0.21396069640569457
+rouge_l: 0.5148640774432521
+############################
+----------------------------------------
+num_doc: 6
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_6/reranked_tfidf-0.5/\n
+{'testlen': 30133, 'reflen': 27941, 'guess': [30133, 18828, 11530, 7866], 'correct': [15125, 5857, 1820, 635]}
+ratio: 1.0784510217958885
+############################
+F1: 1.0
+Semantic_Similarity: 0.38972808590290675
+bleu_1: 0.5019413931569873
+bleu_2: 0.3951500334743313
+bleu_3: 0.2910194678724824
+bleu_4: 0.21120124672109267
+rouge_l: 0.5160171273683377
+############################
+----------------------------------------
+num_doc: 7
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_7/reranked_tfidf-0.5/\n
+{'testlen': 30518, 'reflen': 28166, 'guess': [30518, 19214, 11842, 8124], 'correct': [15253, 5913, 1860, 656]}
+ratio: 1.0835049350280095
+############################
+F1: 1.0
+Semantic_Similarity: 0.39174871795461597
+bleu_1: 0.499803394717855
+bleu_2: 0.3921883123864964
+bleu_3: 0.28908511287952776
+bleu_4: 0.21016131469560667
+rouge_l: 0.5189931031873548
+############################
+----------------------------------------
+num_doc: 8
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_8/reranked_tfidf-0.5/\n
+{'testlen': 30663, 'reflen': 28189, 'guess': [30663, 19360, 11988, 8265], 'correct': [15232, 5895, 1839, 664]}
+ratio: 1.0877647309233713
+############################
+F1: 1.0
+Semantic_Similarity: 0.3912840322704877
+bleu_1: 0.4967550467990576
+bleu_2: 0.3889200852232985
+bleu_3: 0.28522346167558615
+bleu_4: 0.20778789344838752
+rouge_l: 0.5185354256057195
+############################
+----------------------------------------
+num_doc: 9
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_9/reranked_tfidf-0.5/\n
+{'testlen': 30683, 'reflen': 28149, 'guess': [30683, 19383, 12006, 8277], 'correct': [15301, 5934, 1860, 669]}
+ratio: 1.0900209598919646
+############################
+F1: 1.0
+Semantic_Similarity: 0.39271952220073775
+bleu_1: 0.4986800508424698
+bleu_2: 0.3907277627443719
+bleu_3: 0.28704790541087455
+bleu_4: 0.2091000214014621
+rouge_l: 0.519959859832456
+############################
+----------------------------------------
+num_doc: 10
+dir_name: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/output_ms2_dpr-trivia-test_docs_10/reranked_tfidf-0.5/\n
+{'testlen': 31065, 'reflen': 28235, 'guess': [31065, 19769, 12369, 8601], 'correct': [15299, 5931, 1851, 651]}
+ratio: 1.1002302107313229
+############################
+F1: 1.0
+Semantic_Similarity: 0.3925886272716854
+bleu_1: 0.49248350233380034
+bleu_2: 0.3843859054029266
+bleu_3: 0.280674040188812
+bleu_4: 0.20225985653703907
+rouge_l: 0.5187544439512395
+############################
+----------------------------------------
