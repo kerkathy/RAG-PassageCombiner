@@ -22,8 +22,11 @@ print_variables() {
     echo "----------------------------------------"
 }
 
-for dataset_short_name in "msmarcoqa"; do
-# for dataset_short_name in "dpr-trivia-test" "hotpot"; do
+
+for dataset_short_name in $1; do
+# for dataset_short_name in "dpr-trivia-test" "hotpot" "msmarcoqa" "eli5" "strategyQA" "AmbigQA"; do
+    mkdir -p result/${dataset_short_name}
+
     echo "Running retrieval for $dataset_short_name"
     corpus_name=ms2
     output_file=result/${dataset_short_name}/${corpus_name}.${dataset_short_name}.hits-100.json
@@ -31,87 +34,100 @@ for dataset_short_name in "msmarcoqa"; do
     topic_reader=io.anserini.search.topicreader.DprNqTopicReader
     formatted_output_file=result/${dataset_short_name}/formatted-${corpus_name}.${dataset_short_name}.hits-100.json
 
-    # if [ -f $intermediate_file ]; then
-    #     echo "Output file already exists, skipping"
-    #     continue
-    # fi
-    # if [ -f $output_file ]; then
-    #     echo "Output file $output_file already exists, skipping"
-    #     continue
-    # fi
+    case $dataset_short_name in
+        "hotpot"|"msmarcoqa"|"eli5"|"strategyQA"|"AmbigQA")
+            data_dir=/home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/data
 
-    if [ $dataset_short_name == "hotpot" ]|| [ $dataset_short_name == "msmarcoqa" ]; then
-        dataset_path=/home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/data/msmarco-qa/MSMARCO-Question-Answering/Data/train_v2.1_nlgen-subset-12467.json
-        topic_file_intid=${output_file/.json/.topic.int-id.tsv}
-        topic_file_qa=${output_file/.json/.topic.qa.tsv}
-    
-        print_variables
+            case $dataset_short_name in
+                "hotpot")
+                    dataset_path=${data_dir}/hotpot/hotpot_dev_dpr_format.json
+                    ;;
+                "msmarcoqa")
+                    dataset_path=${data_dir}/msmarco-qa/MSMARCO-Question-Answering/Data/train_v2.1_nlgen-subset-12467.json
+                    ;;
+                "eli5")
+                    dataset_path=${data_dir}/KILT/data/eli5-dev-kilt_format.json
+                    ;;
+                "strategyQA")
+                    dataset_path=${data_dir}/StrategyQA/strategyqa_train_format.json
+                    ;;
+                "AmbigQA")
+                    dataset_path=${data_dir}/AmbigQA/data/dev_light_format.json
+                    ;;
+            esac
 
-        # Convert raw dataset file to topics file
-        python convert_raw_to_topic.py \
-            --input $dataset_path \
-            --output $topic_file_intid \
-            --dataset $dataset_short_name \
-            --function topic_conversion \
-            --format int-id
+            topic_file_intid=${output_file/.json/.topic.int-id.tsv}
+            topic_file_qa=${output_file/.json/.topic.qa.tsv}
+        
+            print_variables
 
-        echo "Finished converting raw dataset to topics file"
+            # Convert raw dataset file to topics file
+            python convert_raw_to_topic.py \
+                --input $dataset_path \
+                --output $topic_file_intid \
+                --dataset $dataset_short_name \
+                --function topic_conversion \
+                --format int-id
 
-        # topic.tsv format: <qid> <query>
-        python -m pyserini.search.lucene \
+            echo "Finished converting raw dataset to topics file"
+
+            # topic.tsv format: <qid> <query>
+            python -m pyserini.search.lucene \
+                --index msmarco-v2-passage \
+                --topics $topic_file_intid \
+                --output $intermediate_file \
+                --batch-size 36 --threads 12 \
+                --hits 100 \
+                --bm25
+
+            # Create a tsv with <question>\t<answer>
+            python convert_raw_to_topic.py \
+                --input $dataset_path \
+                --output $topic_file_qa \
+                --dataset $dataset_short_name \
+                --function topic_conversion \
+                --format qa
+            
+            # For corpus whose contents has no title, e.g., (wiki+web) or (web) corpus, use this custom run
+            python convert_trec_run_to_dpr_retrieval_run.py \
+                --topics-file $topic_file_qa \
+                --topics-reader $topic_reader \
+                --index msmarco-v2-passage \
+                --input $intermediate_file \
+                --output $output_file \
+                --combine-title-text \
+                --store-raw
+
+            echo "Finished converting trec run to dpr retrieval run"
+            echo "File written to $output_file"
+            ;;
+
+        "nq-test"|"dpr-trivia-test")
+            topic_file=$dataset_short_name
+            
+            print_variables
+            
+            # Create a tsv with <question>\t<answer>
+            python -m pyserini.search.lucene \
             --index msmarco-v2-passage \
-            --topics $topic_file_intid \
+            --topics $dataset_short_name \
             --output $intermediate_file \
             --batch-size 36 --threads 12 \
             --hits 100 \
             --bm25
 
-        # Create a tsv with <question>\t<answer>
-        python convert_raw_to_topic.py \
-            --input $dataset_path \
-            --output $topic_file_qa \
-            --dataset $dataset_short_name \
-            --function topic_conversion \
-            --format qa
-        
-        # For corpus whose contents has no title, e.g., (wiki+web) or (web) corpus, use this custom run
-        python convert_trec_run_to_dpr_retrieval_run.py \
-            --topics-file $topic_file_qa \
-            --topics-reader $topic_reader \
-            --index msmarco-v2-passage \
-            --input $intermediate_file \
-            --output $output_file \
-            --combine-title-text \
-            --store-raw
+            # For corpus whose contents has no title, e.g., (wiki+web) or (web) corpus, use this custom run
+            python convert_trec_run_to_dpr_retrieval_run.py \
+                --topics $topic_file \
+                --index msmarco-v2-passage \
+                --input $intermediate_file \
+                --output $output_file \
+                --store-raw
 
-        echo "Finished converting trec run to dpr retrieval run"
-        echo "File written to $output_file"
-
-    elif [ $dataset_short_name == "nq-test" ] || [ $dataset_short_name == "dpr-trivia-test" ]; then
-        topic_file=$dataset_short_name
-        
-        print_variables
-        
-        # Create a tsv with <question>\t<answer>
-        python -m pyserini.search.lucene \
-        --index msmarco-v2-passage \
-        --topics $dataset_short_name \
-        --output $intermediate_file \
-        --batch-size 36 --threads 12 \
-        --hits 100 \
-        --bm25
-
-        # For corpus whose contents has no title, e.g., (wiki+web) or (web) corpus, use this custom run
-        python convert_trec_run_to_dpr_retrieval_run.py \
-            --topics $topic_file \
-            --index msmarco-v2-passage \
-            --input $intermediate_file \
-            --output $output_file \
-            --store-raw
-
-        echo "Finished converting trec run to dpr retrieval run"
-        echo "File written to $output_file"
-    fi
+            echo "Finished converting trec run to dpr retrieval run"
+            echo "File written to $output_file"
+            ;;
+        esac
     
     echo "Finished retrieval for $dataset_short_name, output file: $output_file"
 

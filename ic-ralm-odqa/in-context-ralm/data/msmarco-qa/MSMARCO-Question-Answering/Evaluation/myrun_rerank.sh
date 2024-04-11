@@ -1,5 +1,5 @@
 corpus_name="ms2"
-dataset_name="dpr-trivia-test"
+dataset_name="msmarcoqa"
 echo "corpus: $corpus_name"
 echo "dataset: $dataset_name"
 

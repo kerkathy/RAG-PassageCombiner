@@ -119,7 +119,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", type=str, required=True, help="Path to the input file")
     parser.add_argument("-o", "--output", type=str, required=True, help="Path to the output file")
-    parser.add_argument("-d", "--dataset", type=str, required=True, choices=["hotpot", "msmarcoqa", "msmarco-v2-subset"], help="Dataset to convert")
+    parser.add_argument("-d", "--dataset", type=str, required=True, choices=["hotpot", "msmarcoqa", "msmarco-v2-subset", "eli5", "strategyQA", "AmbigQA"], help="Dataset to convert")
     parser.add_argument("-f", "--function", type=str, required=True, choices=["id_conversion", "topic_conversion"], help="Function to run")
     parser.add_argument("-m", "--mapping-output", type=str, help="Path to the mapping file")
     parser.add_argument("--format", type=str, default="qa", choices=["qa", "int-id", "str-id"], help="Format for topic data")

@@ -11,11 +11,13 @@ from tqdm import tqdm
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer, util
 from ralm.file_utils import print_args
 
-# global variables to store the similarity matrices
+# global variables to store the frequently used variables
 similarity_matrices = {}
 query_similarity = {}
+model = None 
 
 def eq_1(x):
     epsilon = 1e-9  # a very small number
@@ -52,6 +54,18 @@ def custom_similarity(paragraphs, query=None, method="tfidf"):
         docs = [nlp(text) for text in paragraphs]
         similarity_matrix = [[doc1.similarity(doc2) for doc2 in docs] for doc1 in docs]
     
+    elif method == "sbert":
+        global model
+        passage_embedding = model.encode(paragraphs)
+        
+        if query is None:
+            similarity_matrix = util.dot_score(passage_embedding, passage_embedding)
+        else:
+            query_embedding = model.encode(query)
+            similarity = util.dot_score(query_embedding, passage_embedding)[0] # shape (1, num_paragraphs) -> (num_paragraphs,)
+            similarity_matrix = similarity.reshape(1, -1)
+        return similarity_matrix
+   
     else:
         raise NotImplementedError(f"Method {method} not implemented.")
 
@@ -126,9 +140,11 @@ def mmr_rerank(dataset, sim_method, lambda_param):
     return dataset
 
 
-def load_json(file_path):
+def load_json(file_path, debug=False):
     with open(file_path, "r") as f:
         data = json.load(f)
+    if debug:
+        data = data[:10]
     return data
 
 
@@ -144,9 +160,14 @@ def check_output_file(output_file):
 
 
 def main(args):
+    global model
     print_args(args)
 
-    dataset = load_json(args.input_file)
+    if args.sim_method == "sbert":
+        model_name = "all-mpnet-base-v2"
+        model = SentenceTransformer(model_name)
+
+    dataset = load_json(args.input_file, args.debug)
 
     if args.algo == "basic":
         assert args.sim_thresholds is not None, "Please provide the similarity thresholds for basic rerank."
@@ -158,6 +179,10 @@ def main(args):
             output_file = args.input_file.replace(".json", f"-reranked-{args.sim_method}-{sim_threshold}.json")
         elif args.algo == "mmr":
             output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{args.lambda_param}-{args.sim_method}-{sim_threshold}.json")
+        
+        if args.debug:
+            output_file = output_file.replace(".json", "-debug.json")
+        
         check_output_file(output_file)
 
         # Use the precalculated similarity matrix
@@ -177,9 +202,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True)
+    parser.add_argument("--debug", action="store_true")
 
     # Rerank params
-    parser.add_argument("--sim_method", type=str, choices=["tfidf", "spacy"], required=True)
+    parser.add_argument("--sim_method", type=str, choices=["tfidf", "spacy", "sbert"], required=True)
     parser.add_argument("--algo", type=str, choices=["basic", "mmr"], required=True)
 
     # Basic rerank params

@@ -10,6 +10,9 @@ from tqdm import tqdm
 
 from ralm.file_utils import print_args
 from ralm.model_utils import load_model_and_tokenizer
+
+# TODO: 把 prompt 改寫到另一個 py 檔
+
 # %%
 
 def normalize_question(question):
@@ -19,8 +22,25 @@ def normalize_question(question):
     return question[0].lower() + question[1:]
 
 
-def build_qa_prompt(example, num_docs=1, require_long=False):
-    if num_docs == 0:
+def build_qa_prompt(example, num_docs=1, require_long=False, output_true_false=False):
+    if output_true_false:
+        # for strategyQA, we need to output true/false
+        # don't care about num of doc
+        q = normalize_question(example["question"])
+        docs_text = "\n\n".join([ctx['text'] for ctx in example["ctxs"][:num_docs]])
+        ex_prompt = f"""Given a question and a context, provide a Yes or No answer and explain why. If you are unsure, answer Unknown.
+
+#
+Context:
+{docs_text}
+
+Question:
+{q}
+
+Answer (Yes/No/Unknown):
+"""
+        
+    elif num_docs == 0:
         question_text = normalize_question(example["question"])
         ex_prompt = f"Answer these questions:\nQ: {question_text}\nA:"
     elif num_docs == 1:
@@ -79,7 +99,8 @@ def get_answer_from_model_output(outputs, tokenizer, prompt):
 
 
 def evaluate_dataset(
-        model, tokenizer, device, eval_dataset, max_length, num_docs=0, output_dir=None, max_tokens_to_generate=10
+        model, tokenizer, device, eval_dataset, max_length, num_docs=0, output_dir=None, max_tokens_to_generate=10, 
+        output_true_false = False,
 ):
     idx = 0
     num_correct = 0
@@ -90,9 +111,9 @@ def evaluate_dataset(
     for ex in (tq := tqdm(eval_dataset, desc=f"EM:  0.0%")):
         answers = ex["answers"]
         if max_tokens_to_generate > 10:
-            prompt = build_qa_prompt(ex, num_docs=num_docs, require_long=True) # for some dataset like msmarcoqa, we need the generation to be longer
+            prompt = build_qa_prompt(ex, num_docs=num_docs, require_long=True, output_true_false=output_true_false) # for some dataset like msmarcoqa, we need the generation to be longer
         else:
-            prompt = build_qa_prompt(ex, num_docs=num_docs)
+            prompt = build_qa_prompt(ex, num_docs=num_docs, output_true_false=output_true_false)
         if idx == 0:
             sample_prompt = prompt
         has_answer = text_has_answer(answers, prompt)
@@ -164,6 +185,7 @@ def main(args):
         num_docs=args.num_docs,
         output_dir=args.output_dir,
         max_tokens_to_generate=args.max_tokens,
+        output_true_false=True if "strategyQA" in args.dataset_path else False,
     )
 
 
