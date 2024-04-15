@@ -158,7 +158,6 @@ def check_output_file(output_file):
             print("Exiting...")
             sys.exit(0)
 
-
 def main(args):
     global model
     print_args(args)
@@ -171,33 +170,28 @@ def main(args):
 
     if args.algo == "basic":
         assert args.sim_thresholds is not None, "Please provide the similarity thresholds for basic rerank."
+        param_list = args.sim_thresholds
+        rerank_func = basic_rerank
+    elif args.algo == "mmr":
+        sim_threshold = 1 # dummy value
+        param_list = args.lambda_params
+        rerank_func = mmr_rerank
     else:
-        args.sim_thresholds = [1] # dummy value
-
-    for sim_threshold in args.sim_thresholds:
+        raise NotImplementedError(f"Algorithm {args.algo} not implemented.")
+    
+    for param in param_list:
         if args.algo == "basic":
-            output_file = args.input_file.replace(".json", f"-reranked-{args.sim_method}-{sim_threshold}.json")
+            output_file = args.input_file.replace(".json", f"-reranked-{args.sim_method}-{param}.json")
         elif args.algo == "mmr":
-            output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{args.lambda_param}-{args.sim_method}-{sim_threshold}.json")
-        
+            output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{param}-{args.sim_method}-{sim_threshold}.json")
         if args.debug:
             output_file = output_file.replace(".json", "-debug.json")
-        
         check_output_file(output_file)
 
-        # Use the precalculated similarity matrix
-        if args.algo == "basic":
-            reranked_dataset = basic_rerank(dataset, args.sim_method, sim_threshold)
-        elif args.algo == "mmr":
-            reranked_dataset = mmr_rerank(dataset, args.sim_method, args.lambda_param)
-        else:
-            raise NotImplementedError(f"Algorithm {args.algo} not implemented.")
-
+        reranked_dataset = rerank_func(dataset, args.sim_method, param)
         with open(output_file, "w") as f:
             json.dump(reranked_dataset, f, indent=4)
-
         print(f"Reranked dataset saved to {output_file}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -212,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--sim_thresholds", nargs='+', type=float) # list of similarity thresholds e.g., 0.5, 0.6, 0.7
 
     # MMR param
-    parser.add_argument("--lambda_param", type=float, default=0.5)
+    parser.add_argument("--lambda_params", nargs='+', type=float)
 
     args = parser.parse_args()
     main(args)
