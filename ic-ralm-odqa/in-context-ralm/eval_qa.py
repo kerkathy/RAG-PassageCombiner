@@ -46,11 +46,16 @@ Answer (Yes/No/Unknown):
     elif num_docs == 1:
         q = normalize_question(example["question"])
         title = example['ctxs'][0]['title']
+        if title == None:
+            title = ""
         text = example['ctxs'][0]['text']
         ex_prompt = f"{title}\n\n{text}\n\nBased on this text, answer these questions:\nQ: {q}\nA:"
     else:
         q = normalize_question(example["question"])
-        docs_text = "\n\n".join([f"{ctx['title']}\n\n{ctx['text']}" for ctx in example["ctxs"][:num_docs]])
+        if example["ctxs"][0]["title"] is not None:
+            docs_text = "\n\n".join([f"{ctx['title']}\n\n{ctx['text']}" for ctx in example["ctxs"][:num_docs]])
+        else:
+            docs_text = "\n\n".join([f"Document {i}: {ctx['text']}" for i, ctx in enumerate(example["ctxs"][:num_docs])])
         if require_long:
             ex_prompt = f"{docs_text}\n\nBased on these texts, answer these questions in full sentence, as completely as possible:\nQ: {q}\nA:"
         else:
@@ -158,7 +163,6 @@ def evaluate_dataset(
             for item in id_pred_ans:
                 f.write(json.dumps({"query_id": item[0], "answers": item[2]}) + "\n")
         
-
 
 def load_dataset(dataset_path):
     print("Loading dataset:", dataset_path)

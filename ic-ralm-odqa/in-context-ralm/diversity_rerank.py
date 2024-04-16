@@ -11,13 +11,16 @@ from tqdm import tqdm
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
 from sentence_transformers import SentenceTransformer, util
+
 from ralm.file_utils import print_args
 
 # global variables to store the frequently used variables
 similarity_matrices = {}
 query_similarity = {}
-model = None 
+model = None
 
 def eq_1(x):
     epsilon = 1e-9  # a very small number
@@ -35,7 +38,11 @@ def custom_similarity(paragraphs, query=None, method="tfidf"):
         query: list of a string
         method: str, one of "tfidf", "spacy"
     Returns:
-        similarity_scores: list of lists, where similarity_scores[i][j] is the similarity score between paragraph i and j
+        similarity_scores: 
+            - list of lists (if query is None)
+              where similarity_scores[i][j] is the similarity score between paragraph i and j
+            - list of floats (if query is not None)
+              where similarity_scores[i] is the similarity score between the query and paragraph i
     """
     if method == "tfidf":
         vectorizer = TfidfVectorizer()
@@ -140,6 +147,51 @@ def mmr_rerank(dataset, sim_method, lambda_param):
     return dataset
 
 
+def kmeans_rerank(dataset, sim_method, k, max_iter=100, n_init=10):
+    """
+    Rerank the documents using KMeans clustering.
+    Steps for each query:
+    1. Cluster the documents into k clusters
+    2. Sort documents in each cluster by similarity to the query
+    3. Put them in the reranked list
+    4. Repeat 2-3 until all documents are selected
+    """
+    for data in tqdm(dataset):
+        reranked_ctxs = []
+        ctx_texts = [x["text"] for x in data["ctxs"]]
+
+        # Convert the documents to a matrix of TF-IDF features
+        vectorizer = TfidfVectorizer()
+        X = vectorizer.fit_transform(ctx_texts)
+
+        # Perform clustering using KMeans
+        kmeans = KMeans(n_clusters=k, max_iter=max_iter, n_init=n_init)
+        kmeans.fit(X)
+
+        similarities = custom_similarity(ctx_texts, query=data["question"], method=sim_method)
+        all_cluster_doc_ids = {i: [] for i in range(k)}
+        
+        # For each cluster, select the documents in order of their similarity to the query
+        for cluster in range(k):
+            # get the indices of the documents in the cluster
+            cluster_doc_ids = [i for i, label in enumerate(kmeans.labels_) if label == cluster]
+            all_cluster_doc_ids[cluster] = sorted(cluster_doc_ids, key=lambda x: similarities[0][x], reverse=True)
+
+        # Put the documents in the reranked list
+        # choose 1 from the first cluster, 1 from the second cluster, and so on
+        for _ in range(len(data["ctxs"])): 
+            for cluster in range(k):
+                if all_cluster_doc_ids[cluster]:
+                    # pop the first element from the clust
+                    reranked_ctxs.append(all_cluster_doc_ids[cluster].pop(0))
+
+        data["ctxs"] = [data["ctxs"][x] for x in reranked_ctxs]
+
+    return dataset
+
+# %%
+# %%
+
 def load_json(file_path, debug=False):
     with open(file_path, "r") as f:
         data = json.load(f)
@@ -176,6 +228,10 @@ def main(args):
         sim_threshold = 1 # dummy value
         param_list = args.lambda_params
         rerank_func = mmr_rerank
+    elif args.algo == "kmeans":
+        sim_threshold = 1 # dummy value
+        param_list = args.k
+        rerank_func = kmeans_rerank
     else:
         raise NotImplementedError(f"Algorithm {args.algo} not implemented.")
     
@@ -183,6 +239,8 @@ def main(args):
         if args.algo == "basic":
             output_file = args.input_file.replace(".json", f"-reranked-{args.sim_method}-{param}.json")
         elif args.algo == "mmr":
+            output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{param}-{args.sim_method}-{sim_threshold}.json")
+        elif args.algo == "kmeans":
             output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{param}-{args.sim_method}-{sim_threshold}.json")
         if args.debug:
             output_file = output_file.replace(".json", "-debug.json")
@@ -200,13 +258,16 @@ if __name__ == "__main__":
 
     # Rerank params
     parser.add_argument("--sim_method", type=str, choices=["tfidf", "spacy", "sbert"], required=True)
-    parser.add_argument("--algo", type=str, choices=["basic", "mmr"], required=True)
+    parser.add_argument("--algo", type=str, choices=["basic", "mmr", "kmeans"], required=True)
 
     # Basic rerank params
     parser.add_argument("--sim_thresholds", nargs='+', type=float) # list of similarity thresholds e.g., 0.5, 0.6, 0.7
 
     # MMR param
     parser.add_argument("--lambda_params", nargs='+', type=float)
+
+    # KMeans param
+    parser.add_argument("--k", nargs='+', type=int)
 
     args = parser.parse_args()
     main(args)
