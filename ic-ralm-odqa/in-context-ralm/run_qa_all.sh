@@ -1,7 +1,7 @@
 set -e
 
 export CUDA_DEVICE_ORDER="PCI_BUS_ID"
-export CUDA_VISIBLE_DEVICES="0,1,2"
+export CUDA_VISIBLE_DEVICES="3,5"
 
 debug_mode=false
 
@@ -20,7 +20,7 @@ fi
 dataset_short_name=$1
 # "nq-test" "dpr-trivia-test" "hotpot" "msmarcoqa" "eli5" "strategyQA" 
 algo=$2
-# "basic" "mmr" "kmeans"
+# "basic" "mmr" "kmeans" "activeRDD"
 method=$3
 # "tfidf" "sbert"
 
@@ -118,6 +118,26 @@ elif [ "$algo" = "kmeans" ]; then
         fi
         print_and_run $reranked_file $reranked_output_dir
     done
+elif [ "$algo" = "activeRDD" ]; then
+    for alpha in $(seq 0.0 0.1 1); do
+        for beta in $(seq 0.0 0.1 1); do
+            # skip if alpha + beta > 1
+            if (( $(echo "$alpha + $beta > 1" | bc -l) )); then
+                continue
+            fi
+            reranked_file=${dataset_path/.json/-reranked-activeRDD-${alpha}-${beta}-${method}-${threshold}.json}
+            reranked_output_dir=${output_dir}/reranked-activeRDD-${alpha}-${beta}-${method}-${threshold}
+            if [ $model == "meta-llama/Llama-2-7b-hf" ]; then
+                reranked_output_dir=${reranked_output_dir}-llama2
+            fi
+            if [ $debug_mode == true ]; then
+                reranked_file=${reranked_file/.json/-debug.json}
+                reranked_output_dir=${reranked_output_dir}-debug
+            fi
+            print_and_run $reranked_file $reranked_output_dir
+        done
+    done
+fi
 else
     echo "Invalid algo"
     exit 1

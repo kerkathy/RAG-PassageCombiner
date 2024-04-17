@@ -79,7 +79,7 @@ def custom_similarity(paragraphs, query=None, method="tfidf"):
     return similarity_matrix
 
 
-def basic_rerank(dataset, sim_method, sim_threshold=0.5):
+def basic_rerank(dataset, sim_method, max_num_docs, sim_threshold):
     """
     Greedily rerank the documents by removing the ones that are too similar to the ones already selected.
     """
@@ -90,6 +90,8 @@ def basic_rerank(dataset, sim_method, sim_threshold=0.5):
         similarity_matrix = similarity_matrices[i]
         if not eq_1(sim_threshold):
             for i, ctx in enumerate(data["ctxs"]):
+                if len(reranked_ctxs) >= max_num_docs:
+                    break
                 if i == 0:
                     reranked_ctxs.append({"pos": i, "content": ctx})
                 else:
@@ -108,7 +110,7 @@ def basic_rerank(dataset, sim_method, sim_threshold=0.5):
     return dataset
 
 
-def mmr_rerank(dataset, sim_method, lambda_param):
+def mmr_rerank(dataset, sim_method, max_num_docs, lambda_param):
     """
     Greedily rerank the documents using Maximal Marginal Relevance (MMR) algorithm.
     In each iteration, select the document that has the highest MMR score
@@ -127,10 +129,10 @@ def mmr_rerank(dataset, sim_method, lambda_param):
         query_sim = query_similarity[i]
 
         # rerank the documents
-        while len(reranked_ctxs) < len(data["ctxs"]):
+        while len(reranked_ctxs) < max_num_docs:
             max_mmr_score = -1
             max_mmr_pos = -1
-            for i, ctx in enumerate(data["ctxs"]):
+            for i, _ in enumerate(data["ctxs"]):
                 if i in reranked_ctxs:
                     continue
                 mmr_score = lambda_param * query_sim[0][i]
@@ -147,7 +149,52 @@ def mmr_rerank(dataset, sim_method, lambda_param):
     return dataset
 
 
-def kmeans_rerank(dataset, sim_method, k, max_iter=100, n_init=10):
+def activeRDD_rerank(dataset, sim_method, max_num_docs, alpha_beta):
+    """
+    Greedily rerank the documents using Active RDD algorithm.
+    In each iteration, select the document that has the highest Active RDD score
+
+    relevance = similarity(query, document)
+    density = sum(similarity(document, all)) / |all|
+    diversity = max(similarity(document, selected))
+    Active RDD score = alpha * relevance - beta * density + (1 - alpha - beta) * diversity
+    """
+    alpha_param, beta_param = alpha_beta
+    for i, data in tqdm(enumerate(dataset)):
+        reranked_ctxs = []
+        ctx_texts = [x["text"] for x in data["ctxs"]]
+
+        # update and fetch global similarity matrices
+        if i not in similarity_matrices:
+            similarity_matrices[i] = custom_similarity(ctx_texts, method=sim_method)
+        if i not in query_similarity:
+            query_similarity[i] = custom_similarity(ctx_texts, query=data["question"], method=sim_method)
+        similarity_matrix = similarity_matrices[i]
+        query_sim = query_similarity[i]
+
+        # rerank the documents
+        while len(reranked_ctxs) < max_num_docs:
+            max_active_rdd_score = -1
+            max_active_rdd_pos = -1
+            for i, _ in enumerate(data["ctxs"]):
+                if i in reranked_ctxs:
+                    continue
+                relevance = query_sim[0][i]
+                density = sum(similarity_matrix[i]) / len(similarity_matrix[i])
+                diversity = max([similarity_matrix[i][x] for x in reranked_ctxs]) if reranked_ctxs != [] else 0
+                active_rdd_score = alpha_param * relevance - beta_param * density + (1 - alpha_param - beta_param) * diversity
+                if active_rdd_score  > max_active_rdd_score:
+                    max_active_rdd_score = active_rdd_score
+                    max_active_rdd_pos = i
+            reranked_ctxs.append(max_active_rdd_pos)
+
+        # get rid of pos, and only keep content
+        data["ctxs"] = [data["ctxs"][x] for x in reranked_ctxs]
+
+    return dataset
+
+
+def kmeans_rerank(dataset, sim_method, max_num_docs, k, max_iter=100, n_init=10):
     """
     Rerank the documents using KMeans clustering.
     Steps for each query:
@@ -165,7 +212,7 @@ def kmeans_rerank(dataset, sim_method, k, max_iter=100, n_init=10):
         X = vectorizer.fit_transform(ctx_texts)
 
         # Perform clustering using KMeans
-        kmeans = KMeans(n_clusters=k, max_iter=max_iter, n_init=n_init)
+        kmeans = KMeans(n_clusters=k, max_iter=max_iter, n_init=n_init, random_state=0)
         kmeans.fit(X)
 
         similarities = custom_similarity(ctx_texts, query=data["question"], method=sim_method)
@@ -179,7 +226,7 @@ def kmeans_rerank(dataset, sim_method, k, max_iter=100, n_init=10):
 
         # Put the documents in the reranked list
         # choose 1 from the first cluster, 1 from the second cluster, and so on
-        for _ in range(len(data["ctxs"])): 
+        for _ in range(max_num_docs):
             for cluster in range(k):
                 if all_cluster_doc_ids[cluster]:
                     # pop the first element from the clust
@@ -189,7 +236,6 @@ def kmeans_rerank(dataset, sim_method, k, max_iter=100, n_init=10):
 
     return dataset
 
-# %%
 # %%
 
 def load_json(file_path, debug=False):
@@ -232,6 +278,10 @@ def main(args):
         sim_threshold = 1 # dummy value
         param_list = args.k
         rerank_func = kmeans_rerank
+    elif args.algo == "activeRDD":
+        sim_threshold = 1 # dummy value
+        param_list = [(alpha, beta) for alpha in args.alpha_params for beta in args.beta_params]
+        rerank_func = activeRDD_rerank
     else:
         raise NotImplementedError(f"Algorithm {args.algo} not implemented.")
     
@@ -242,23 +292,32 @@ def main(args):
             output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{param}-{args.sim_method}-{sim_threshold}.json")
         elif args.algo == "kmeans":
             output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{param}-{args.sim_method}-{sim_threshold}.json")
+        elif args.algo == "activeRDD":
+            # avoid negative weight for diversity 
+            if param[0] + param[1] > 1:
+                continue
+            output_file = args.input_file.replace(".json", f"-reranked-{args.algo}-{param[0]}-{param[1]}-{args.sim_method}-{sim_threshold}.json")
         if args.debug:
             output_file = output_file.replace(".json", "-debug.json")
         check_output_file(output_file)
 
-        reranked_dataset = rerank_func(dataset, args.sim_method, param)
+        reranked_dataset = rerank_func(dataset, args.sim_method, args.max_num_docs, param)
         with open(output_file, "w") as f:
             json.dump(reranked_dataset, f, indent=4)
         print(f"Reranked dataset saved to {output_file}")
+        
+        if args.debug:
+            break
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--max_num_docs", type=int, default=100)
 
     # Rerank params
     parser.add_argument("--sim_method", type=str, choices=["tfidf", "spacy", "sbert"], required=True)
-    parser.add_argument("--algo", type=str, choices=["basic", "mmr", "kmeans"], required=True)
+    parser.add_argument("--algo", type=str, choices=["basic", "mmr", "kmeans", "activeRDD"], required=True)
 
     # Basic rerank params
     parser.add_argument("--sim_thresholds", nargs='+', type=float) # list of similarity thresholds e.g., 0.5, 0.6, 0.7
@@ -268,6 +327,10 @@ if __name__ == "__main__":
 
     # KMeans param
     parser.add_argument("--k", nargs='+', type=int)
+
+    # ActiveRDD param
+    parser.add_argument("--alpha_params", nargs='+', type=float)
+    parser.add_argument("--beta_params", nargs='+', type=float)
 
     args = parser.parse_args()
     main(args)

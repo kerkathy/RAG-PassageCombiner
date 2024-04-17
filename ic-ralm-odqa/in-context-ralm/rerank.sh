@@ -1,7 +1,7 @@
 set -e
 # run diversity_rerank.py for diff algo, filter method, and threshold 
-# export CUDA_DEVICE_ORDER="PCI_BUS_ID"
-# export CUDA_VISIBLE_DEVICES="2"
+export CUDA_DEVICE_ORDER="PCI_BUS_ID"
+export CUDA_VISIBLE_DEVICES="0,1,2"
 
 corpus_name=ms2
 
@@ -9,8 +9,8 @@ dataset_short_name=$1
 algo=$2
 sim_method=$3
 # "nq-test" "dpr-trivia-test" "hotpot" "msmarcoqa" "eli5" "strategyQA" "AmbigQA"
-# algo=basic mmr kmeans
-# sim_method=sbert tfidf
+# algo=basic mmr kmeans activeRDD
+# sim_method=tfidf sbert 
 
 start_time=$(date +%s)
 
@@ -40,6 +40,18 @@ elif [ "$algo" = "kmeans" ]; then
       --sim_method $sim_method \
       --algo $algo \
       --k 2 4 \
+      # --debug
+  done
+elif [ "$algo" = "activeRDD" ]; then
+  for dataset_short_name in $dataset_short_name; do
+    dataset_path=reproduce_retrieval/result/${dataset_short_name}/formatted-${corpus_name}.${dataset_short_name}.hits-100.json
+    python diversity_rerank.py \
+      --input_file $dataset_path \
+      --max_num_docs 20 \
+      --sim_method $sim_method \
+      --algo $algo \
+      --alpha_params 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
+      --beta_params 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9
       # --debug
   done
 else 
