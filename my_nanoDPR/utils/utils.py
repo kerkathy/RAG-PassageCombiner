@@ -60,14 +60,16 @@ def get_linear_scheduler(
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
-def get_sentence_embedding(doc, tokenizer, model, device):
+def get_sentence_embedding(doc, tokenizer, model):
+    import torch
     inputs = tokenizer(doc, return_tensors='pt', truncation=True, padding=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Moving inputs to device: ", device)
+    inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
     print("inputs.keys(): ", inputs.keys())
-    print("inputs.input_ids.shape: ", inputs.input_ids.shape)
-    print("inputs.attention_mask.shape: ", inputs.attention_mask.shape)
-    print("inputs.token_type_ids.shape: ", inputs.token_type_ids.shape, "\n")
-    print("...Moving inputs to the correct device...")
-    inputs = {name: tensor.to(device) for name, tensor in inputs.items()}  # Move inputs to the correct device
+    print("inputs['input_ids'].shape: ", inputs['input_ids'].shape)
+    print("inputs['attention_mask'].shape: ", inputs['attention_mask'].shape)
+    print("inputs['token_type_ids'].shape: ", inputs['token_type_ids'].shape)
     print("...Sending into model...")
     # TODO debug here!!
     outputs = model(**inputs)
@@ -93,14 +95,16 @@ def make_index(corpus, tokenizer, encoder, batch_size=32):
             embeddings_list.extend(embeddings.tolist())
     return torch.tensor(embeddings_list)
 
-def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k, device):  # Add the device argument
+def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k):  # Add the device argument
     """
     Compute cosine similarity between query and documents in the doc_index
     return top k documents
     """
     import torch
 
-    query_embedding = get_sentence_embedding(query, tokenizer, query_encoder, device)  # Pass the device to get_sentence_embedding
+    query_embedding = get_sentence_embedding(query, tokenizer, query_encoder)  # Pass the device to get_sentence_embedding
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    query_embedding, doc_embeddings = query_embedding.to(device), doc_embeddings.to(device)
     scores = torch.nn.functional.cosine_similarity(query_embedding, doc_embeddings, dim=1)
     top_doc_scores, top_doc_indices = torch.topk(scores, k)
     top_doc_indices = top_doc_indices.flatten().tolist()
