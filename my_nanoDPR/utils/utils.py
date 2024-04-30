@@ -64,12 +64,11 @@ def get_sentence_embedding(doc, tokenizer, model, device):
     model = model.to(device)
     inputs = tokenizer(doc, return_tensors='pt', truncation=True, padding=True)
     inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
-    print("inputs.keys(): ", inputs.keys())
-    print("inputs['input_ids'].shape: ", inputs['input_ids'].shape)
-    print("inputs['attention_mask'].shape: ", inputs['attention_mask'].shape)
-    print("inputs['token_type_ids'].shape: ", inputs['token_type_ids'].shape)
-    print("...Sending into model...")
-    # TODO debug here!!
+    # print("inputs.keys(): ", inputs.keys())
+    # print("inputs['input_ids'].shape: ", inputs['input_ids'].shape)
+    # print("inputs['attention_mask'].shape: ", inputs['attention_mask'].shape)
+    # print("inputs['token_type_ids'].shape: ", inputs['token_type_ids'].shape)
+    # print("...Sending into model...")
     outputs = model(**inputs)
     return outputs.last_hidden_state.mean(dim=1)
 

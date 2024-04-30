@@ -66,27 +66,15 @@ class DualEncoder(nn.Module):
 
     def forward(
         self,
-        query_input_ids, # [bs,seq_len]
-        query_attention_mask, # [bs,seq_len]
-        query_token_type_ids, # [bs,seq_len],
-        doc_input_ids, # [bs*n_comb,seq_len]
-        doc_attention_mask, # [bs*n_comb,seq_len]
-        doc_token_type_ids, # [bs*n_comb,seq_len]
+        query_inputs, # each [bs,seq_len]
+        doc_inputs, # each [bs*n_comb,seq_len]
     ):  
         CLS_POS = 0
         ## [bs,n_dim]
-        query_embedding = self.query_encoder(
-            input_ids=query_input_ids,
-            attention_mask = query_attention_mask,
-            token_type_ids = query_token_type_ids,
-            ).last_hidden_state[:,CLS_POS,:]
+        query_embedding = self.query_encoder(**query_inputs).last_hidden_state[:,CLS_POS,:]
         
         ## [bs*n_comb,n_dim]
-        doc_embedding = self.doc_encoder(
-            input_ids = doc_input_ids,
-            attention_mask = doc_attention_mask,
-            token_type_ids = doc_token_type_ids,
-            ).last_hidden_state[:,CLS_POS,:]
+        doc_embedding = self.doc_encoder(**doc_inputs).last_hidden_state[:,CLS_POS,:]
         
         return query_embedding,doc_embedding  # [bs,n_dim], [bs*n_comb,n_dim]
 
@@ -94,15 +82,18 @@ def calculate_dpr_loss(matching_score,labels):
     return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
 
 def calculate_KL_div_loss(
-    input_dstr, # [bs,comb]
-    target_dstr, # [bs,comb]
+    input_logits, # [n_question,n_comb]
+    target_logits, # [n_question,n_comb]
     temperature,
 ):
-    # Calculate KL divergence loss
+    """
+    Calculate KL divergence loss between input and target logits
+    Note: input_logits and target_logits are logits, not distributions
+    """
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     loss = kl_loss(
-        F.log_softmax(input_dstr / temperature, dim=1),
-        F.softmax(target_dstr / temperature, dim=1),
+        F.log_softmax(input_logits / temperature, dim=1),
+        F.softmax(target_logits / temperature, dim=1),
     )
     return loss
 
@@ -160,58 +151,63 @@ class QADataset(torch.utils.data.Dataset):
         samples = [item for sublist in samples for item in sublist]
         print("len(samples): ", len(samples))
         
-        features = ['input_ids', 'attention_mask', 'token_type_ids']
-
         # Tokenize the data
-        query_ret_results = self.ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
-        doc_ret_results = self.ret_tokenizer([x[1] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
-        prompt_ans_lm_results = self.lm_tokenizer(
+        query_inputs = self.ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
+        doc_inputs = self.ret_tokenizer([x[1] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
+        prompt_ans_lm_inputs = self.lm_tokenizer(
             [" ".join([x[0], x[1]]) for x in samples], 
             [x[2] for x in samples], 
-            max_length=256, padding=True, truncation=True, return_tensors='pt'
+            max_length=256, padding=True, truncation=True, return_tensors='pt',
+            return_token_type_ids=True
         )
 
-        mapping = {"query_ret_": query_ret_results, "doc_ret_": doc_ret_results, "prompt_ans_lm_": prompt_ans_lm_results}
-        collate_dict ={}
-
-        for k, v in mapping.items():
-            for feature in features:
-                if feature in v:
-                    collate_dict[k+feature] = v[feature]
-
-        return collate_dict
+        return {
+            "query_inputs": query_inputs,
+            "doc_inputs": doc_inputs,
+            "prompt_ans_lm_inputs": prompt_ans_lm_inputs,
+        }
             
-            
-def validate(model,dataloader,accelerator):
-    model.eval()
-    query_embeddings = []
-    positive_doc_embeddings = []
-    negative_doc_embeddings = []
-    for batch in dataloader:
+def validate(args, dual_encoder, language_model, validation_dataloader, accelerator, model_max_length):
+    dual_encoder.eval()
+    language_model.eval()
+    total_loss = 0
+    num_batches = 0
+
+    for step, batch in enumerate(validation_dataloader):
         with torch.no_grad():
-            query_embedding,doc_embedding  = model(**batch)
-        query_num,_ = query_embedding.shape
-        query_embeddings.append(query_embedding.cpu())
-        positive_doc_embeddings.append(doc_embedding[:query_num,:].cpu())
-        negative_doc_embeddings.append(doc_embedding[query_num:,:].cpu())
+            query_embedding, doc_embedding = dual_encoder(query_inputs=batch['query_inputs'], doc_inputs=batch['doc_inputs'])
+            single_device_query_num, _ = query_embedding.shape
+            single_device_doc_num, _ = doc_embedding.shape
 
-    query_embeddings = torch.cat(query_embeddings,dim=0)
-    doc_embeddings = torch.cat(positive_doc_embeddings+negative_doc_embeddings,dim=0)
-    matching_score = torch.matmul(query_embeddings,doc_embeddings.permute(1,0)) # bs, num_pos+num_neg
-    labels = torch.arange(query_embeddings.shape[0],dtype=torch.int64).to(matching_score.device)
-    loss = calculate_dpr_loss(matching_score,labels=labels).item()
-    ranks = calculate_average_rank(matching_score,labels=labels)
-    
-    if accelerator.use_distributed and accelerator.num_processes>1:
-        ranks_from_all_gpus = [None for _ in range(accelerator.num_processes)] 
-        dist.all_gather_object(ranks_from_all_gpus,ranks)
-        ranks = [x for y in ranks_from_all_gpus for x in y]
+            if accelerator.use_distributed:
+                doc_list = [torch.zeros_like(doc_embedding) for _ in range(accelerator.num_processes)]
+                dist.all_gather(tensor_list=doc_list, tensor=doc_embedding.contiguous())
+                doc_list[dist.get_rank()] = doc_embedding
+                doc_embedding = torch.cat(doc_list, dim=0)
 
-        loss_from_all_gpus = [None for _ in range(accelerator.num_processes)] 
-        dist.all_gather_object(loss_from_all_gpus,loss)
-        loss = sum(loss_from_all_gpus)/len(loss_from_all_gpus)
-    
-    return sum(ranks)/len(ranks),loss
+                query_list = [torch.zeros_like(query_embedding) for _ in range(accelerator.num_processes)]
+                dist.all_gather(tensor_list=query_list, tensor=query_embedding.contiguous())
+                query_list[dist.get_rank()] = query_embedding
+                query_embedding = torch.cat(query_list, dim=0)
+
+            retriever_score = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
+            num_orig_question = args.per_device_eval_batch_size
+            retriever_score = retriever_score.reshape(num_orig_question, -1)
+
+            lm_score = get_lm_score(
+                language_model, 
+                **batch['prompt_ans_lm_inputs'],
+                max_length=model_max_length,
+                max_tokens_to_generate=args.max_tokens,
+                num_orig_question=num_orig_question,
+            )
+            loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
+
+            total_loss += loss.item()
+            num_batches += 1
+
+    avg_loss = total_loss / num_batches
+    return avg_loss
 
 # %%
 def main():
@@ -315,24 +311,20 @@ def main():
         logger.debug(f"... About to load batches in epoch {epoch} ...")
         for step,batch in enumerate(train_dataloader):
             logger.debug(f"... Successfully load batches in epoch {epoch} ...")
-
-            logger.debug(f"... Loading step {step} ...")
-            prompt_ans_lm_input_ids = batch['prompt_ans_lm_input_ids'].to(accelerator.device)
-            prompt_ans_lm_attention_mask = batch['prompt_ans_lm_attention_mask'].to(accelerator.device)
-            prompt_ans_lm_token_type_ids = batch['prompt_ans_lm_token_type_ids'].to(accelerator.device)
-
             with accelerator.accumulate(dual_encoder):
                 with accelerator.autocast():
-                    # remove prompt_lm_input_ids, answer_lm_input_ids from batch
-                    for key in ['prompt_ans_lm_input_ids','prompt_ans_lm_attention_mask','prompt_ans_lm_token_type_ids']:
-                        del batch[key]
-                    
-                    logger.debug("Sending batch to model...")
-                    query_embedding,doc_embedding  = dual_encoder(**batch)
+                    logger.debug("...Sending batch to model...")
+                    logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
+                    logger.debug(f"batch['doc_inputs']['input_ids']: {batch['doc_inputs']['input_ids'].shape}")
+                    query_embedding,doc_embedding  = dual_encoder(query_inputs=batch['query_inputs'],doc_inputs=batch['doc_inputs'])
+                    logger.debug(f"query_embedding.shape: {query_embedding.shape}")
+                    logger.debug(f"doc_embedding.shape: {doc_embedding.shape}")
+                    # shape of both query_embedding and doc_embedding: [bs,n_dim]
+                    # here bs = n_comb * num_orig_question
                     single_device_query_num,_ = query_embedding.shape
                     single_device_doc_num,_ = doc_embedding.shape
 
-                    logger.debug("Waiting for everyone...")
+                    logger.debug("...Waiting for everyone...")
                     if accelerator.use_distributed:
                         doc_list = [torch.zeros_like(doc_embedding) for _ in range(accelerator.num_processes)]
                         dist.all_gather(tensor_list=doc_list, tensor=doc_embedding.contiguous())
@@ -344,27 +336,24 @@ def main():
                         query_list[dist.get_rank()] = query_embedding
                         query_embedding = torch.cat(query_list, dim=0)
 
-                    matching_score = torch.matmul(query_embedding,doc_embedding.permute(1,0)) # [bs,bs*n_comb]
-                    labels = torch.cat([torch.arange(single_device_query_num) + gpu_index * single_device_doc_num for gpu_index in range(accelerator.num_processes)],dim=0).to(matching_score.device) # [bs]
-                    
-                    # Select only necessary columns from labels
-                    bs = single_device_query_num
-                    n_comb = single_device_doc_num // bs
-                    indices = torch.arange(bs*n_comb).view(bs, n_comb)
-                    retrieval_dstr = retrieval_dstr[torch.arange(bs).unsqueeze(1), indices] # [bs,n_comb]
+                    logger.debug("...Calculating loss from DPR...")
+                    retriever_score = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
+                    num_orig_question = args.per_device_train_batch_size
+                    retriever_score = retriever_score.reshape(num_orig_question, -1)
+                    logger.debug(f"retriever_score.shape: {retriever_score.shape}")
+                    logger.debug(f"retriever_score: {retriever_score}")
 
                     logger.debug("Calculating loss from LM...")
                     lm_score = get_lm_score(
                         language_model, 
-                        input_ids=prompt_ans_lm_input_ids,
-                        attention_mask=prompt_ans_lm_attention_mask,
-                        token_type_ids=prompt_ans_lm_token_type_ids,
+                        **batch['prompt_ans_lm_inputs'],
                         max_length=model_max_length,
                         max_tokens_to_generate=args.max_tokens,
-                        num_orig_question=args.per_device_train_batch_size,
-                        temperature=args.temperature,
+                        num_orig_question=num_orig_question,
                     )
-                    loss = calculate_KL_div_loss(retrieval_dstr=retrieval_dstr, lm_dstr=lm_score, temperature=args.temperature)
+                    logger.debug(f"lm_score: {lm_score}")
+                    loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
+                    logger.debug(f"loss: {loss}")
 
                 accelerator.backward(loss)
 
@@ -380,9 +369,9 @@ def main():
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
                     if completed_steps % EVAL_STEPS == 0:
-                        avg_rank,loss = validate(dual_encoder,dev_dataloader,accelerator)
+                        loss = validate(args,dual_encoder,language_model,dev_dataloader,accelerator,model_max_length)
                         dual_encoder.train()
-                        accelerator.log({"avg_rank": avg_rank, "loss":loss}, step=completed_steps)
+                        accelerator.log({"loss":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
                         if accelerator.is_local_main_process:
                             unwrapped_model = accelerator.unwrap_model(dual_encoder)
@@ -401,6 +390,21 @@ def main():
         wandb_tracker.finish()
     
     accelerator.end_training()
+    logger.debug("...!!Congrats!! Training finished :) ...")
 # %%
 if __name__ == '__main__':
     main()
+
+# %%
+# # debug
+# import torch
+# import torch.nn.functional as F
+# # %%
+# tmp = torch.tensor([[-123.1659, -120.9617,  -39.9989],
+#     [ -54.0244,  -54.0071,  -50.6071]]
+# )
+
+# F.log_softmax(tmp, dim=1),
+
+
+# # %%

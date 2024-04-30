@@ -41,7 +41,7 @@ def get_lm_score(
     attention_mask,
     token_type_ids,
     max_length, max_tokens_to_generate, 
-    num_orig_question, temperature=1
+    num_orig_question,
 ):
     """
     Take a model and a batch of input_ids, attention_mask, and token_type_ids and return the log probability of the input_ids
@@ -65,14 +65,9 @@ def get_lm_score(
 
     # compute sequence scores
     # option 1. sum of log probabilities 
-    sum_log_probs = probs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
+    sum_neg_log_probs = probs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
     # option 2. joint probability
     # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
 
-    # %%
-    # Turn n_comb into a distribution
-    # sum_log_probs = torch.softmax(sum_log_probs / temperature, dim=-1).detach() # [num_orig_question, n_comb]
-    # joint_probs = torch.softmax(joint_probs / temperature, dim=-1).detach() # [num_orig_question, n_comb]
-    
-    # %%
-    return sum_log_probs # [num_orig_question, n_comb]
+    # return positive log probability
+    return -sum_neg_log_probs # [num_orig_question, n_comb]
