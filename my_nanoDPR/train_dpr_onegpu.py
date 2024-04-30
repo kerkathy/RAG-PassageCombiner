@@ -119,7 +119,7 @@ def calculate_average_rank(matching_score,labels):
     return ranks
 
 class QADataset(torch.utils.data.Dataset):
-    def __init__(self, data, doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args):
+    def __init__(self, data, doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args, device):
         self.data = data
         self.doc_embeddings = doc_embeddings
         self.ret_tokenizer = ret_tokenizer
@@ -127,17 +127,16 @@ class QADataset(torch.utils.data.Dataset):
         self.query_encoder = query_encoder
         self.stage = stage
         self.args = args
+        self.device = device
         
     def __len__(self):
         return len(self.data)
-
+    
     def __getitem__(self, idx):
         sample = self.data[idx]
         corpus = [x['text'] for x in sample['ctxs']]
-        doc_embeddings = self.doc_embeddings[idx]
+        doc_embeddings = self.doc_embeddings[idx].to(self.device)  # Move to correct device
         data = [(normalize_query(sample['question']), "", sample['answers'][0])] # tmp fix, only use the first answer 
-        # data = [(normalize_query(sample['question']), "", ans) for ans in sample['answers']] # turn each answer into a separate data point
-        # print("data: ", data)
         cur_prompt_ans = queue.Queue()
         next_prompts_ans = queue.Queue()
         for d in data:
@@ -146,15 +145,13 @@ class QADataset(torch.utils.data.Dataset):
             cur_prompt_ans, next_prompts_ans = next_prompts_ans, cur_prompt_ans
             while not cur_prompt_ans.empty():
                 prompt, answer = cur_prompt_ans.get()
-                doc_ids = retrieve_top_k_docid(prompt, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k)
+                doc_ids = retrieve_top_k_docid(prompt, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k, self.device)  # Pass device to function
                 for docid in doc_ids:
                     doc = corpus[docid]
-                    # print("docid: ", docid)
-                    # print("doc: ", doc)
                     data.append((prompt, doc, answer))
                     next_prompts_ans.put((" ".join([prompt, doc]), answer))
-        return data # List of tuples
 
+        return data # List of tuples
     def collate_fn(self, samples):
         """
         samples: List[List[tuple]]
@@ -269,8 +266,8 @@ def main():
     print("train_doc_embeddings[0].shape: ", train_doc_embeddings[0].shape)
     print("dev_doc_embeddings[0].shape: ", dev_doc_embeddings[0].shape, "\n")
 
-    train_dataset = QADataset(train_data, train_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'train', args)
-    dev_dataset = QADataset(dev_data, dev_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'dev', args)
+    train_dataset = QADataset(train_data, train_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'train', args, accelerator.device)
+    dev_dataset = QADataset(dev_data, dev_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'dev', args, accelerator.device)
     
     # debug: set num_worker=0, pin_memory=False
     train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=args.per_device_train_batch_size,shuffle=True,collate_fn=train_dataset.collate_fn,num_workers=0,pin_memory=False)
@@ -318,96 +315,87 @@ def main():
         logger.debug(f"... About to load batches in epoch {epoch} ...")
         for step,batch in enumerate(train_dataloader):
             logger.debug(f"... Successfully load batches in epoch {epoch} ...")
-            # start of debug
-            for k, v in batch.items():
-                if "ret_input_ids" in k:
-                    print(f"{k}: ", ret_tokenizer.batch_decode(v, skip_special_tokens=True), "\n")
-                if "lm_input_ids" in k:
-                    print(f"{k}: ", lm_tokenizer.batch_decode(v, skip_special_tokens=True), "\n")
-            break
-            # end of debug
 
+            logger.debug(f"... Loading step {step} ...")
+            prompt_ans_lm_input_ids = batch['prompt_ans_lm_input_ids'].to(accelerator.device)
+            prompt_ans_lm_attention_mask = batch['prompt_ans_lm_attention_mask'].to(accelerator.device)
+            prompt_ans_lm_token_type_ids = batch['prompt_ans_lm_token_type_ids'].to(accelerator.device)
 
-            # logger.debug(f"... Loading step {step} ...")
-            # prompt_ans_lm_input_ids = batch['prompt_ans_lm_input_ids'].to(accelerator.device)
-            # prompt_ans_lm_attention_mask = batch['prompt_ans_lm_attention_mask'].to(accelerator.device)
-            # prompt_ans_lm_token_type_ids = batch['prompt_ans_lm_token_type_ids'].to(accelerator.device)
-
-            # with accelerator.accumulate(dual_encoder):
-            #     with accelerator.autocast():
-            #         # remove prompt_lm_input_ids, answer_lm_input_ids from batch
-            #         for key in ['prompt_ans_lm_input_ids','prompt_ans_lm_attention_mask','prompt_ans_lm_token_type_ids']:
-            #             del batch[key]
+            with accelerator.accumulate(dual_encoder):
+                with accelerator.autocast():
+                    # remove prompt_lm_input_ids, answer_lm_input_ids from batch
+                    for key in ['prompt_ans_lm_input_ids','prompt_ans_lm_attention_mask','prompt_ans_lm_token_type_ids']:
+                        del batch[key]
                     
-            #         logger.debug("Sending batch to model...")
-            #         query_embedding,doc_embedding  = dual_encoder(**batch)
-            #         single_device_query_num,_ = query_embedding.shape
-            #         single_device_doc_num,_ = doc_embedding.shape
+                    logger.debug("Sending batch to model...")
+                    query_embedding,doc_embedding  = dual_encoder(**batch)
+                    single_device_query_num,_ = query_embedding.shape
+                    single_device_doc_num,_ = doc_embedding.shape
 
-            #         logger.debug("Waiting for everyone...")
-            #         if accelerator.use_distributed:
-            #             doc_list = [torch.zeros_like(doc_embedding) for _ in range(accelerator.num_processes)]
-            #             dist.all_gather(tensor_list=doc_list, tensor=doc_embedding.contiguous())
-            #             doc_list[dist.get_rank()] = doc_embedding
-            #             doc_embedding = torch.cat(doc_list, dim=0)
+                    logger.debug("Waiting for everyone...")
+                    if accelerator.use_distributed:
+                        doc_list = [torch.zeros_like(doc_embedding) for _ in range(accelerator.num_processes)]
+                        dist.all_gather(tensor_list=doc_list, tensor=doc_embedding.contiguous())
+                        doc_list[dist.get_rank()] = doc_embedding
+                        doc_embedding = torch.cat(doc_list, dim=0)
 
-            #             query_list = [torch.zeros_like(query_embedding) for _ in range(accelerator.num_processes)]
-            #             dist.all_gather(tensor_list=query_list, tensor=query_embedding.contiguous())
-            #             query_list[dist.get_rank()] = query_embedding
-            #             query_embedding = torch.cat(query_list, dim=0)
+                        query_list = [torch.zeros_like(query_embedding) for _ in range(accelerator.num_processes)]
+                        dist.all_gather(tensor_list=query_list, tensor=query_embedding.contiguous())
+                        query_list[dist.get_rank()] = query_embedding
+                        query_embedding = torch.cat(query_list, dim=0)
 
-            #         matching_score = torch.matmul(query_embedding,doc_embedding.permute(1,0)) # [bs,bs*n_comb]
-            #         labels = torch.cat([torch.arange(single_device_query_num) + gpu_index * single_device_doc_num for gpu_index in range(accelerator.num_processes)],dim=0).to(matching_score.device) # [bs]
+                    matching_score = torch.matmul(query_embedding,doc_embedding.permute(1,0)) # [bs,bs*n_comb]
+                    labels = torch.cat([torch.arange(single_device_query_num) + gpu_index * single_device_doc_num for gpu_index in range(accelerator.num_processes)],dim=0).to(matching_score.device) # [bs]
                     
-            #         # Select only necessary columns from labels
-            #         bs = single_device_query_num
-            #         n_comb = single_device_doc_num // bs
-            #         indices = torch.arange(bs*n_comb).view(bs, n_comb)
-            #         retrieval_dstr = retrieval_dstr[torch.arange(bs).unsqueeze(1), indices] # [bs,n_comb]
+                    # Select only necessary columns from labels
+                    bs = single_device_query_num
+                    n_comb = single_device_doc_num // bs
+                    indices = torch.arange(bs*n_comb).view(bs, n_comb)
+                    retrieval_dstr = retrieval_dstr[torch.arange(bs).unsqueeze(1), indices] # [bs,n_comb]
 
-            #         logger.debug("Calculating loss from LM...")
-            #         lm_score = get_lm_score(
-            #             language_model, 
-            #             input_ids=prompt_ans_lm_input_ids,
-            #             attention_mask=prompt_ans_lm_attention_mask,
-            #             token_type_ids=prompt_ans_lm_token_type_ids,
-            #             max_length=model_max_length,
-            #             max_tokens_to_generate=args.max_tokens,
-            #             num_orig_question=args.per_device_train_batch_size,
-            #             temperature=args.temperature,
-            #         )
-            #         loss = calculate_KL_div_loss(retrieval_dstr=retrieval_dstr, lm_dstr=lm_score, temperature=args.temperature)
+                    logger.debug("Calculating loss from LM...")
+                    lm_score = get_lm_score(
+                        language_model, 
+                        input_ids=prompt_ans_lm_input_ids,
+                        attention_mask=prompt_ans_lm_attention_mask,
+                        token_type_ids=prompt_ans_lm_token_type_ids,
+                        max_length=model_max_length,
+                        max_tokens_to_generate=args.max_tokens,
+                        num_orig_question=args.per_device_train_batch_size,
+                        temperature=args.temperature,
+                    )
+                    loss = calculate_KL_div_loss(retrieval_dstr=retrieval_dstr, lm_dstr=lm_score, temperature=args.temperature)
 
-            #     accelerator.backward(loss)
+                accelerator.backward(loss)
 
-            #     ## one optimization step
-            #     if accelerator.sync_gradients:
-            #         progress_bar.update(1)
-            #         progress_bar.set_postfix(loss=f"{loss:.4f}",lr=f"{lr_scheduler.get_last_lr()[0]:6f}")
-            #         completed_steps += 1
-            #         accelerator.clip_grad_norm_(dual_encoder.parameters(), args.max_grad_norm)
-            #         if not accelerator.optimizer_step_was_skipped:
-            #             lr_scheduler.step()
-            #         accelerator.log({"training_loss": loss}, step=completed_steps)
-            #         accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
+                ## one optimization step
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    progress_bar.set_postfix(loss=f"{loss:.4f}",lr=f"{lr_scheduler.get_last_lr()[0]:6f}")
+                    completed_steps += 1
+                    accelerator.clip_grad_norm_(dual_encoder.parameters(), args.max_grad_norm)
+                    if not accelerator.optimizer_step_was_skipped:
+                        lr_scheduler.step()
+                    accelerator.log({"training_loss": loss}, step=completed_steps)
+                    accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
-            #         if completed_steps % EVAL_STEPS == 0:
-            #             avg_rank,loss = validate(dual_encoder,dev_dataloader,accelerator)
-            #             dual_encoder.train()
-            #             accelerator.log({"avg_rank": avg_rank, "loss":loss}, step=completed_steps)
-            #             accelerator.wait_for_everyone()
-            #             if accelerator.is_local_main_process:
-            #                 unwrapped_model = accelerator.unwrap_model(dual_encoder)
-            #                 unwrapped_model.query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
-            #                 ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
+                    if completed_steps % EVAL_STEPS == 0:
+                        avg_rank,loss = validate(dual_encoder,dev_dataloader,accelerator)
+                        dual_encoder.train()
+                        accelerator.log({"avg_rank": avg_rank, "loss":loss}, step=completed_steps)
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_local_main_process:
+                            unwrapped_model = accelerator.unwrap_model(dual_encoder)
+                            unwrapped_model.query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
+                            ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
                             
-            #                 unwrapped_model.doc_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
-            #                 ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
+                            unwrapped_model.doc_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
+                            ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
 
-            #             accelerator.wait_for_everyone()
+                        accelerator.wait_for_everyone()
                 
-            #     optimizer.step()
-            #     optimizer.zero_grad()
+                optimizer.step()
+                optimizer.zero_grad()
     
     if not debug and accelerator.is_local_main_process:
         wandb_tracker.finish()
