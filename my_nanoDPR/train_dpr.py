@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from tqdm import tqdm
+import wandb
 
 ## own
 from utils import (
@@ -35,7 +36,8 @@ from utils import (
     get_lm_score,
 )
 
-debug = True  # Set this to False when you're done debugging
+debug = False  # set log mode to debug, and stop wandb logging
+take_few_data = True  # Set this to True to take only a few data for debugging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -164,7 +166,7 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
     dual_encoder.eval()
     language_model.eval()
     total_loss = 0
-    total_lm_score = 0
+    avg_ans_prob = 0
     num_batches = 0
 
     for step, batch in enumerate(validation_dataloader):
@@ -205,31 +207,27 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
                 num_orig_question=num_orig_question,
                 llm_batch_size=args.llm_batch_size,
             )
-
-            # TODO for each question, take idx of max retriever_score 
-            # get its corresponding lm_score
-            # retriever_score and lm_score are both [n_question,n_comb]
-            # retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
-            # lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
-
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             logger.debug(f"...Calculating loss...: {torch.cuda.memory_allocated() / 1e6} MB")
             loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
+            # TODO for each question, take idx of max retriever_score 
+            # get its corresponding lm_score
+            # retriever_score and lm_score are both [n_question,n_comb]
+            retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
+            lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
+
             total_loss += loss.item()
-            # total_lm_score += lm_score.sum().item()
+            avg_ans_prob += lm_score.exp().mean().item()
             num_batches += 1
 
     avg_loss = total_loss / num_batches
     logger.info(f"Validation loss: {avg_loss}")
-    # logger.info(f"Validation answer score: {total_lm_score}")
-    return avg_loss
+    logger.info(f"Validation avg answer prob: {avg_ans_prob}")
+    return {"loss": avg_loss, "ans_log_prob": avg_ans_prob}
 
-def makesure_not_cpu(obj):
-    if obj.device.type == 'cpu':
-        raise ValueError("Object is on cpu")
 
 # %%
 def main():
@@ -259,6 +257,8 @@ def main():
         LOG_DIR = wandb_tracker.run.dir
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
+    
+    wandb_tracker.run.log_code(".")
 
     logger.info("...Loading retriever models...")
     ret_tokenizer = BertTokenizer.from_pretrained(args.retriever_model)
@@ -267,6 +267,8 @@ def main():
     dual_encoder = DualEncoder(query_encoder,doc_encoder)
     dual_encoder.train()
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+    
+    wandb_tracker.run.watch(dual_encoder, log="all", log_freq=20)
 
     logger.info("...Loading language models...")
     language_model, lm_tokenizer, lm_config, lm_device = load_lm_model_and_tokenizer(
@@ -279,6 +281,10 @@ def main():
 
     logger.info("...Loading data...")
     train_data = json.load(open(args.train_file))
+
+    if take_few_data:
+        train_data = train_data[:10000]
+
     if args.train_file == args.dev_file:
         # random split train and dev data
         random.shuffle(train_data)
@@ -286,10 +292,8 @@ def main():
         train_data = train_data[len(train_data)//10:]
     else:
         dev_data = json.load(open(args.dev_file))
-
-    # if debug:
-    #     train_data = train_data[:50]
-    #     dev_data = dev_data[:50]
+        if take_few_data:
+            dev_data = dev_data[:1000]
 
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
@@ -314,8 +318,9 @@ def main():
         assert len(dev_doc_embeddings) == len(dev_corpus)
     else:
         logger.info(f"...Creating index...")
-        # add tqdm
+        logger.info(f"...Creating train index with size {len(train_corpus)}...")
         train_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
+        logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
         dev_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
         torch.save(train_doc_embeddings, args.train_index_path)
         torch.save(dev_doc_embeddings, args.dev_index_path)
@@ -366,15 +371,15 @@ def main():
     logger.info(f"  Num dev examples = {len(dev_dataset)}")
     logger.info(f"  Num Epochs = {MAX_TRAIN_EPOCHS}")
     logger.info(f"  Per device train batch size = {args.per_device_train_batch_size}")
+    logger.info(f"  Extended train batch size (retriever batch size) = {args.per_device_train_batch_size * sum([args.k ** i for i in range(args.num_round + 1)])}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {TOTAL_TRAIN_BATCH_SIZE}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {MAX_TRAIN_STEPS}")
     logger.info(f"  Num steps per evaluation = {EVAL_STEPS}")
     logger.info(f"  Per device eval batch size = {args.per_device_eval_batch_size}")
+    logger.info(f"  LM batch size = {args.llm_batch_size}")
     completed_steps = 0
     progress_bar = tqdm(range(MAX_TRAIN_STEPS), disable=not accelerator.is_local_main_process,ncols=100)
-
-    sys.exit(0)
 
     # compute the time spent
     start_time = time.time()
@@ -386,7 +391,7 @@ def main():
         for step,batch in enumerate(train_dataloader):
             logger.debug(f"... Successfully load batches in epoch {epoch} ...")
             dual_encoder.train()
-            with accelerator.accumulate(dual_encoder):
+            with accelerator.accumulate(dual_encoder): # gradient accumulation
                 with accelerator.autocast():
                     logger.debug("...Sending batch to model...")
                     logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
@@ -457,6 +462,7 @@ def main():
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                 accelerator.backward(loss)
+                accelerator.log({"training_loss": loss}, step=completed_steps)
 
                 ## one optimization step
                 logger.info(f"...Evaluation...")
@@ -472,8 +478,8 @@ def main():
                     
                     if completed_steps % EVAL_STEPS == 0:
                         loss = validate(args,dual_encoder,language_model,dev_dataloader,accelerator,model_max_length)
-                        dual_encoder.train()
-                        accelerator.log({"loss":loss}, step=completed_steps)
+                        dual_encoder.train() # Make sure the model is back in training mode
+                        accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
                         if accelerator.is_local_main_process:
                             unwrapped_model = accelerator.unwrap_model(dual_encoder)
@@ -490,22 +496,17 @@ def main():
                 optimizer.zero_grad()
                 logger.debug(f"Finish step {step}.\n GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
+    logger.info(f"Time spent: {time.time() - start_time} seconds")
+    logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+    logger.info("...!!Congrats!! Training finished :) ...")
+    logger.info(f"Checkpoint saved to {LOG_DIR}")
+
     if not debug and accelerator.is_local_main_process:
         wandb_tracker.finish()
     
     accelerator.end_training()
-    logger.info(f"Time spent: {time.time() - start_time} seconds")
-    logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
-    logger.info("...!!Congrats!! Training finished :) ...")
+
 # %%
 if __name__ == '__main__':
     # torch.multiprocessing.set_start_method('spawn') # try to fix the cuda init error when we put query encoder on cuda
     main()
-
-# %%
-import torch
-x1 = torch.randn(2,3)
-# %%
-idx_dim0 = [0,0]
-idx_dim1 = [0,1,2]
-x1[idx_dim0,idx_dim1]

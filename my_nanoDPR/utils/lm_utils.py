@@ -55,11 +55,10 @@ def get_lm_score(
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
 
     # model = model.to(device)
-    print("LM model device: ", model.device)
-    print("input_ids device: ", input_ids.device)
+    # print("LM model device: ", model.device)
+    # print("input_ids device: ", input_ids.device)
     # print("attention_mask device: ", attention_mask.device)
     # print("token_type_ids device: ", token_type_ids.device)
-    # TODO: batch forward 
     all_outputs = []
     for input_ids_batch, attention_mask_batch, token_type_ids_batch in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size), token_type_ids.split(llm_batch_size)):
         input_ids_batch = input_ids_batch.to(device)
@@ -85,5 +84,4 @@ def get_lm_score(
     # option 2. joint probability
     # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
 
-    # return positive log probability
     return outputs # [num_orig_question, n_comb]
