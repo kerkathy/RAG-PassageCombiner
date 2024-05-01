@@ -71,7 +71,7 @@ def get_sentence_embedding(doc, tokenizer, model, accelerator):
     # print("inputs device: ", inputs['input_ids'].device)
     # print("model device: ", model.device)
     outputs = model(**inputs)
-    print("outputs device: ", model.device)
+    # print("outputs device: ", model.device)
     return outputs.last_hidden_state.mean(dim=1)
 
 def make_index(corpus, tokenizer, encoder, batch_size=32):
@@ -107,6 +107,6 @@ def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k, acc
     scores = torch.nn.functional.cosine_similarity(query_embedding, doc_embeddings, dim=1)
     top_doc_scores, top_doc_indices = torch.topk(scores, k)
     top_doc_indices = top_doc_indices.flatten().tolist()
-    print(f"Finish retrieve_top_k_docid.\nGPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+    # print(f"Finish retrieve_top_k_docid.\nGPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     return top_doc_indices

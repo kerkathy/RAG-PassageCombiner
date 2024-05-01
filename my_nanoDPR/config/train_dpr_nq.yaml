@@ -1,7 +1,6 @@
 ## data
-train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.hits-100.json
-dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.hits-100.json
-
+train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train/formatted-ms2.nq-train.hits-100.json
+dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev/formatted-ms2.nq-dev.hits-100.json
 
 ## training
 # debug: set num_worker=0, pin_memory=False
@@ -12,18 +11,21 @@ num_workers: 0
 pin_memory: False
 auth_token: None
 cache_dir: None
-per_device_train_batch_size: 8
-per_device_eval_batch_size: 8
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
 adam_eps: 1.0e-8
 weight_decay: 0.0
 max_grad_norm: 2.0
 lr: 2.0e-5
 warmup_steps: 1237
-max_train_epochs: 15
+max_train_epochs: 1
 seed: 19980406
 gradient_accumulation_steps: 1
 val_check_interval: 1.0
 num_round: 2
 k: 3
-max_tokens: 100
+max_tokens: 10
 temperature: 0.1
+train_index_path: embeddings/train_full.pt
+dev_index_path: embeddings/train_full.pt
+llm_batch_size: 16
