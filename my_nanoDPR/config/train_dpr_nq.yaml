@@ -1,26 +1,29 @@
 ## data
-train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.hits-100-debug.json
-dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.hits-100-debug.json
+train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.hits-100.json
+dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.hits-100.json
 
 
 ## training
+# debug: set num_worker=0, pin_memory=False
 retriever_model: bert-base-uncased
 lm_model: gpt2
 model_parallelism: False
+num_workers: 0
+pin_memory: False
 auth_token: None
 cache_dir: None
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
 adam_eps: 1.0e-8
 weight_decay: 0.0
 max_grad_norm: 2.0
 lr: 2.0e-5
 warmup_steps: 1237
-max_train_epochs: 1
+max_train_epochs: 15
 seed: 19980406
 gradient_accumulation_steps: 1
 val_check_interval: 1.0
-num_round: 1
-k: 2
+num_round: 2
+k: 3
 max_tokens: 100
 temperature: 0.1

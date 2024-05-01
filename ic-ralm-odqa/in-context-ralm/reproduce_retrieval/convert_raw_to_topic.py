@@ -95,7 +95,8 @@ def convert_hotpot_to_topic(args):
     elif args.format == "int-id":
         for i, example in tqdm(enumerate(data)):
             topic_data.append([i, example["question"]])
-            mapping[example["_id"]] = i
+            if "_id" in example:
+                mapping[example["_id"]] = i
     else:
         raise ValueError(f"args.format {args.format} not supported")
 
@@ -103,7 +104,6 @@ def convert_hotpot_to_topic(args):
     write_to_tsv(topic_data, args.output)
     # if args.format == "int-id":
     #     write_to_json(mapping, args.mapping_output)
-
 
 
 def main(args):
@@ -119,7 +119,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", type=str, required=True, help="Path to the input file")
     parser.add_argument("-o", "--output", type=str, required=True, help="Path to the output file")
-    parser.add_argument("-d", "--dataset", type=str, required=True, choices=["hotpot", "msmarcoqa", "msmarco-v2-subset", "eli5", "strategyQA", "AmbigQA"], help="Dataset to convert")
+    parser.add_argument("-d", "--dataset", type=str, required=True, help="Dataset to convert")
     parser.add_argument("-f", "--function", type=str, required=True, choices=["id_conversion", "topic_conversion"], help="Function to run")
     parser.add_argument("-m", "--mapping-output", type=str, help="Path to the mapping file")
     parser.add_argument("--format", type=str, default="qa", choices=["qa", "int-id", "str-id"], help="Format for topic data")

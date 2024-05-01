@@ -37,6 +37,7 @@ def load_lm_model_and_tokenizer(model_name, model_parallelism=False, cache_dir=N
 
 def get_lm_score(
     model, 
+    device,
     input_ids,
     attention_mask,
     token_type_ids,
@@ -52,6 +53,11 @@ def get_lm_score(
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
 
+    model = model.to(device)
+    print("LM model device: ", model.device)
+    print("input_ids device: ", input_ids.device)
+    print("attention_mask device: ", attention_mask.device)
+    print("token_type_ids device: ", token_type_ids.device)
     outputs = model(input_ids, attention_mask=attention_mask).logits
     probs = torch.log_softmax(outputs, dim=-1).detach()
 

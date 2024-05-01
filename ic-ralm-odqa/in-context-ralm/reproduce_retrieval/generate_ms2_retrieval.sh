@@ -35,10 +35,16 @@ for dataset_short_name in $1; do
     formatted_output_file=result/${dataset_short_name}/formatted-${corpus_name}.${dataset_short_name}.hits-100.json
 
     case $dataset_short_name in
-        "hotpot"|"msmarcoqa"|"eli5"|"strategyQA"|"AmbigQA")
+        "nq-train"|"nq-dev"|"hotpot"|"msmarcoqa"|"eli5"|"strategyQA"|"AmbigQA")
             data_dir=/home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/data
 
             case $dataset_short_name in
+                "nq-dev")
+                    dataset_path=${data_dir}/${dataset_short_name}/nq-dev_format.json
+                    ;;
+                "nq-train")
+                    dataset_path=${data_dir}/${dataset_short_name}/nq-train_format.json
+                    ;;
                 "hotpot")
                     dataset_path=${data_dir}/hotpot/hotpot_dev_dpr_format.json
                     ;;
