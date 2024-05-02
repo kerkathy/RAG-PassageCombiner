@@ -22,7 +22,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from tqdm import tqdm
-import wandb
 
 ## own
 from utils import (
@@ -36,8 +35,8 @@ from utils import (
     get_lm_score,
 )
 
-debug = False  # set log mode to debug, and stop wandb logging
-take_few_data = True  # Set this to True to take only a few data for debugging
+debug = True  # set log mode to debug, and stop wandb logging
+take_few_data = True  # train, dev = 10000, 1000. Set this to True to take only a few data for debugging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -100,8 +99,9 @@ def calculate_KL_div_loss(
     return loss
 
 class QADataset(torch.utils.data.Dataset):
-    def __init__(self, data, doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args, accelerator):
-        self.data = data
+    def __init__(self, qa_pairs, all_corpus, doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args, accelerator):
+        self.qa_pairs = qa_pairs
+        self.all_corpus = all_corpus
         self.doc_embeddings = doc_embeddings
         self.ret_tokenizer = ret_tokenizer
         self.lm_tokenizer = lm_tokenizer
@@ -112,18 +112,19 @@ class QADataset(torch.utils.data.Dataset):
         self.accelerator = accelerator
         
     def __len__(self):
-        return len(self.data)
+        return len(self.qa_pairs)
     
     def __getitem__(self, idx):
-        sample = self.data[idx]
-        corpus = [x['text'] for x in sample['ctxs']]
+        data = self.qa_pairs[idx]
+        corpus = self.all_corpus[idx]
         doc_embeddings = self.doc_embeddings[idx]  # Move to correct device
-        # doc_embeddings = self.doc_embeddings[idx].to(self.device)  # Move to correct device
-        data = [(normalize_query(sample['question']), "", sample['answers'][0])] # tmp fix, only use the first answer 
+        # corpus = [x['text'] for x in sample['ctxs']]
+        # data = [(normalize_query(sample['question']), "", sample['answers'][0])] # tmp fix, only use the first answer 
         cur_prompt_ans = queue.Queue()
         next_prompts_ans = queue.Queue()
         for d in data:
             next_prompts_ans.put((d[0], d[2]))
+            logger.debug(f"Put data: {(d[0], d[2])}")
         for _ in range(self.args.num_round):
             cur_prompt_ans, next_prompts_ans = next_prompts_ans, cur_prompt_ans
             while not cur_prompt_ans.empty():
@@ -166,7 +167,7 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
     dual_encoder.eval()
     language_model.eval()
     total_loss = 0
-    avg_ans_prob = 0
+    total_ans_prob = 0
     num_batches = 0
 
     for step, batch in enumerate(validation_dataloader):
@@ -224,9 +225,10 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
             num_batches += 1
 
     avg_loss = total_loss / num_batches
+    avg_prob = total_ans_prob / num_batches
     logger.info(f"Validation loss: {avg_loss}")
-    logger.info(f"Validation avg answer prob: {avg_ans_prob}")
-    return {"loss": avg_loss, "ans_log_prob": avg_ans_prob}
+    logger.info(f"Validation avg answer prob: {avg_prob}")
+    return {"loss": avg_loss, "avg_prob": avg_prob}
 
 
 # %%
@@ -250,15 +252,15 @@ def main():
     accelerator.init_trackers(
         project_name="dpr", 
         config=args,
+        init_kwargs={"wandb":{"name":"batch size=3"}},
     )
         
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
+        wandb_tracker.run.log_code(".")
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
-    
-    wandb_tracker.run.log_code(".")
 
     logger.info("...Loading retriever models...")
     ret_tokenizer = BertTokenizer.from_pretrained(args.retriever_model)
@@ -268,7 +270,8 @@ def main():
     dual_encoder.train()
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
-    wandb_tracker.run.watch(dual_encoder, log="all", log_freq=20)
+    if not debug and accelerator.is_local_main_process:
+        wandb_tracker.run.watch(dual_encoder, log="all", log_freq=500)
 
     logger.info("...Loading language models...")
     language_model, lm_tokenizer, lm_config, lm_device = load_lm_model_and_tokenizer(
@@ -314,8 +317,8 @@ def main():
         logger.info(f"...Loading index from {args.train_index_path} and {args.dev_index_path}...") 
         train_doc_embeddings = torch.load(args.train_index_path)
         dev_doc_embeddings = torch.load(args.dev_index_path)
-        assert len(train_doc_embeddings) == len(train_corpus)
-        assert len(dev_doc_embeddings) == len(dev_corpus)
+        assert len(train_doc_embeddings) == len(train_corpus), f"len(train_doc_embeddings) ({len(train_doc_embeddings)}) != len(train_corpus), ({len(train_corpus)})"
+        assert len(dev_doc_embeddings) == len(dev_corpus), f"len(dev_doc_embeddings) ({len(dev_doc_embeddings)}) != len(dev_corpus), ({len(dev_corpus)})"
     else:
         logger.info(f"...Creating index...")
         logger.info(f"...Creating train index with size {len(train_corpus)}...")
@@ -330,8 +333,12 @@ def main():
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-    train_dataset = QADataset(train_data, train_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'train', args, accelerator)
-    dev_dataset = QADataset(dev_data, dev_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'dev', args, accelerator)
+
+    train_qa_pairs = [[(normalize_query(sample['question']), "", sample['answers'][0])] for sample in train_data]
+    logger.debug(f"train_qa_pairs: {train_qa_pairs[:2]}")
+    dev_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0]) for sample in dev_data]
+    train_dataset = QADataset(train_qa_pairs, train_corpus, train_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'train', args, accelerator)
+    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, dev_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'dev', args, accelerator)
     
     train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=args.per_device_train_batch_size,shuffle=True,collate_fn=train_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     dev_dataloader = torch.utils.data.DataLoader(dev_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=dev_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
@@ -462,10 +469,8 @@ def main():
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                 accelerator.backward(loss)
-                accelerator.log({"training_loss": loss}, step=completed_steps)
 
                 ## one optimization step
-                logger.info(f"...Evaluation...")
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     progress_bar.set_postfix(loss=f"{loss:.4f}",lr=f"{lr_scheduler.get_last_lr()[0]:6f}")
@@ -477,6 +482,7 @@ def main():
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
                     if completed_steps % EVAL_STEPS == 0:
+                        logger.info(f"...Evaluation...")
                         loss = validate(args,dual_encoder,language_model,dev_dataloader,accelerator,model_max_length)
                         dual_encoder.train() # Make sure the model is back in training mode
                         accelerator.log({"eval":loss}, step=completed_steps)

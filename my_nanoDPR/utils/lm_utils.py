@@ -1,12 +1,11 @@
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, T5Tokenizer, T5ForConditionalGeneration
 from huggingface_hub import login
 
 def load_lm_tokenizer(model_name):
     if "llama" in model_name:
         return LlamaTokenizer.from_pretrained(model_name)
     return AutoTokenizer.from_pretrained(model_name)
-
 
 def load_lm_model_and_tokenizer(model_name, model_parallelism=False, cache_dir=None, auth_token=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
