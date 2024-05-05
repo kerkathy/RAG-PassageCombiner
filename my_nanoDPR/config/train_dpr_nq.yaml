@@ -9,6 +9,7 @@ lm_model: gpt2
 model_parallelism: False
 train_index_path: embeddings/train_50.pt
 dev_index_path: embeddings/dev_10.pt
+empty_doc_embedding_path: embeddings/empty_doc_embedding.pt
 # train_index_path: embeddings/train_full.pt
 # dev_index_path: embeddings/dev_full.pt
 llm_batch_size: 64

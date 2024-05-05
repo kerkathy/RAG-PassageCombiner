@@ -1,7 +1,7 @@
 # %%
 ## built-in
 import time,random,queue,sys
-import math,logging,json,random,os
+import math,logging,json,random,os, psutil
 import types
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
@@ -57,27 +57,6 @@ def parse_args():
     yaml_config.update(args_dict)
     args = types.SimpleNamespace(**yaml_config)
     return args
-
-# class DualEncoder(nn.Module):
-#     def __init__(self,query_encoder,doc_encoder):
-#         super().__init__()
-#         self.query_encoder = query_encoder
-#         self.doc_encoder = doc_encoder
-#         # TODO: whether to freeze the doc encoder
-
-#     def forward(
-#         self,
-#         query_inputs, # each [bs,seq_len]
-#         doc_inputs, # each [bs*n_comb,seq_len]
-#     ):  
-#         CLS_POS = 0
-#         ## [bs,n_dim]
-#         query_embedding = self.query_encoder(**query_inputs).last_hidden_state[:,CLS_POS,:]
-        
-#         ## [bs*n_comb,n_dim]
-#         doc_embedding = self.doc_encoder(**doc_inputs).last_hidden_state[:,CLS_POS,:]
-        
-#         return query_embedding,doc_embedding  # [bs,n_dim], [bs*n_comb,n_dim]
 
 def calculate_dpr_loss(matching_score,labels):
     return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
@@ -307,35 +286,36 @@ def main():
     logger.info(f"Size of train corpus: {len(train_corpus)}")
     logger.info(f"Size of dev corpus: {len(dev_corpus)}")
 
-    # prepare doc_encoder
-    logger.info(f"...Preparing doc encoder...")
-    doc_encoder = accelerator.prepare(doc_encoder)
-    logger.info(f"doc_encoder is on {doc_encoder.device}")
-    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-
-    if os.path.exists(args.train_index_path) and os.path.exists(args.dev_index_path):
+    if os.path.exists(args.train_index_path) and os.path.exists(args.dev_index_path) and os.path.exists(args.empty_doc_embedding_path):
         logger.info(f"...Loading index from {args.train_index_path} and {args.dev_index_path}...") 
         train_doc_embeddings = torch.load(args.train_index_path)
         dev_doc_embeddings = torch.load(args.dev_index_path)
+        empty_doc_embedding = torch.load(args.empty_doc_embedding_path)
         assert len(train_doc_embeddings) == len(train_corpus), f"len(train_doc_embeddings) ({len(train_doc_embeddings)}) != len(train_corpus), ({len(train_corpus)})"
         assert len(dev_doc_embeddings) == len(dev_corpus), f"len(dev_doc_embeddings) ({len(dev_doc_embeddings)}) != len(dev_corpus), ({len(dev_corpus)})"
     else:
-        logger.info(f"...Creating index...")
+        # prepare doc_encoder
+        logger.info(f"...Preparing doc encoder...")
+        doc_encoder = accelerator.prepare(doc_encoder)
+        logger.info(f"doc_encoder is on {doc_encoder.device}")
+        logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         logger.info(f"...Creating train index with size {len(train_corpus)}...")
         with torch.no_grad():
             train_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
             logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
             dev_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
+            # use [UNK]'s representation for empty document
+            unk_inputs = ret_tokenizer("[UNK]", return_tensors='pt').to(doc_encoder.device)
+            empty_doc_embedding = doc_encoder(**unk_inputs).last_hidden_state.mean(dim=1).squeeze(0)
         torch.save(train_doc_embeddings, args.train_index_path)
         torch.save(dev_doc_embeddings, args.dev_index_path)
-        logger.info(f"Index saved to {args.train_index_path} and {args.dev_index_path}")
-    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+        torch.save(empty_doc_embedding, args.empty_doc_embedding_path)
+        logger.info(f"Index saved to {args.train_index_path}, {args.dev_index_path}, {args.empty_doc_embedding_path}")
+        logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+        logger.info("...Deleting doc_encoder...")
+        del doc_encoder
+        logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
-    # use [UNK]'s representation for empty document
-    # TODO fix here
-    with torch.no_grad():
-        unk_inputs = ret_tokenizer("[UNK]", return_tensors='pt').to(doc_encoder.device)
-        empty_doc_embedding = doc_encoder(**unk_inputs).last_hidden_state.mean(dim=1).squeeze(0)
     train_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in train_data]
     dev_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in dev_data]
 
@@ -345,6 +325,11 @@ def main():
     train_dataset = QADataset(train_qa_pairs, train_corpus, train_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'train', args, accelerator)
     dev_dataset = QADataset(dev_qa_pairs, dev_corpus, dev_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'dev', args, accelerator)
     
+    logger.info("...Deleting train_data and dev_data...")
+    logger.info(f"CPU memory used before deletion: {psutil.virtual_memory().used / 1e6} MB")
+    del train_data, dev_data
+    logger.info(f"CPU memory used after deletion: {psutil.virtual_memory().used / 1e6} MB")
+
     train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=args.per_device_train_batch_size,shuffle=True,collate_fn=train_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     dev_dataloader = torch.utils.data.DataLoader(dev_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=dev_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
@@ -392,7 +377,6 @@ def main():
     completed_steps = 0
     progress_bar = tqdm(range(MAX_TRAIN_STEPS), disable=not accelerator.is_local_main_process,ncols=100)
 
-    # compute the time spent
     start_time = time.time()
 
     for epoch in range(MAX_TRAIN_EPOCHS):
@@ -444,9 +428,6 @@ def main():
                     del query_embedding
                     del doc_embedding
 
-                    # free up GPU memory
-                    torch.cuda.empty_cache()
-
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     logger.debug(f"...Calculating loss from LM on {accelerator.device}...")
@@ -468,7 +449,6 @@ def main():
                     logger.debug(f"retriever_score.device: {retriever_score.device}; lm_score.device: {lm_score.device}")
                     loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
                     del retriever_score, lm_score
-                    torch.cuda.empty_cache()
                     logger.debug(f"Finish compute loss. loss = {loss}")
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
@@ -488,18 +468,13 @@ def main():
                     if completed_steps % EVAL_STEPS == 0:
                         logger.info(f"...Evaluation...")
                         loss = validate(args,query_encoder,language_model,dev_dataloader,accelerator,model_max_length)
-                        query_encoder.train() # Make sure the model is back in training mode
+                        query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
                         if accelerator.is_local_main_process:
-                            # unwrapped_model = accelerator.unwrap_model(query_encoder)
-                            # unwrapped_model.query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
                             query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
                             ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
                             
-                            # unwrapped_model.doc_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
-                            # ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
-
                         accelerator.wait_for_everyone()
                 logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                 
