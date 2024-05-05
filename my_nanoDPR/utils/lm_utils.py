@@ -128,7 +128,7 @@ def exact_match(prediction, ground_truth):
 
 def evaluate_dataset(
         model, tokenizer, device, max_length, prompt_ans_lm_inputs,
-        max_tokens_to_generate=10, completed_steps=0, log_dir=None, llm_batch_size=1
+        max_tokens_to_generate=10, steps_log_dir=".", llm_batch_size=1
 ):
     num_correct = 0
     num_too_long = 0
@@ -154,7 +154,6 @@ def evaluate_dataset(
             num_too_long += 1
             prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
-    print("Prompt input ids shape: ", prompt_input_ids.shape)
     for input_ids_batch, prompt_length_batch in tqdm(zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size))):
         with torch.no_grad():
             output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
@@ -171,11 +170,10 @@ def evaluate_dataset(
     print(f"EM: {em:.1f}%")
 
     d = {"em": em, "num_examples": num_data, "too_long": num_too_long}
-    output_dir = os.path.join(log_dir,f"step-{completed_steps}")
 
-    with open(os.path.join(output_dir, "eval.json"), "w") as f:
+    with open(os.path.join(steps_log_dir, "eval.json"), "w", encoding='utf-8') as f:
         f.write(json.dumps(d) + "\n")
-    with open(os.path.join(output_dir, "prediction.json"), "w") as f:
+    with open(os.path.join(steps_log_dir, "prediction.json"), "w", encoding='utf-8') as f:
         for item in all_predictions:
             f.write(item + "\n")
 

@@ -37,7 +37,7 @@ from utils import (
     evaluate_dataset,
 )
 
-debug = True  # set log mode to debug, and stop wandb logging
+debug = False  # set log mode to debug, and stop wandb logging
 take_few_data = True  # train, dev = 200, 100. Set this to True to take only a few data for debugging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
@@ -111,7 +111,7 @@ class QADataset(torch.utils.data.Dataset):
                 for docid in doc_ids:
                     next_prompts_ans.put((" ".join([prompt, corpus[docid]]), answer))
                     data.append((prompt, corpus[docid], answer, doc_embeddings[docid].to(embedding_device)))
-        logger.debug(f"After getitem, data size: {len(data)}")
+        # logger.debug(f"After getitem, data size: {len(data)}")
         return data # List of tuples
 
     def collate_fn(self, samples):
@@ -119,7 +119,7 @@ class QADataset(torch.utils.data.Dataset):
         samples: List[List[tuple]]
         """
         # flatten the samples into a list of tuples
-        logger.debug(f"Original batch size: {len(samples)}")
+        # logger.debug(f"Original batch size: {len(samples)}")
         samples = [item for sublist in samples for item in sublist]
         logger.debug(f"Real batch size: {len(samples)}")
         
@@ -141,7 +141,7 @@ class QADataset(torch.utils.data.Dataset):
     
 def validate(
         query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
-        accelerator, model_max_length, completed_steps, log_dir
+        accelerator, model_max_length, steps_log_dir
 ):
     logger.info("*** Start validation ***")
     query_encoder.eval()
@@ -149,6 +149,7 @@ def validate(
     total_loss = 0
     total_ans_prob = 0
     num_batches = 0
+    all_retriever_pick = []
 
     for step, batch in enumerate(dev_dataloader):
         with torch.no_grad():
@@ -160,7 +161,7 @@ def validate(
             query_embedding = query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
             doc_embedding = batch["doc_embeddings"]
             
-            logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
+            # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
             single_device_query_num, _ = query_embedding.shape
@@ -208,6 +209,7 @@ def validate(
             retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
             lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
             total_ans_prob += lm_score.exp().mean().item()
+            all_retriever_pick.extend(retrievers_pick.tolist())
 
             ## Metric 3. Exact match
             # reshape from [n_question*n_comb,seq_len] to [n_question,n_comb,seq_len]
@@ -226,8 +228,7 @@ def validate(
                 max_length=model_max_length,
                 prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
                 max_tokens_to_generate=args.max_tokens,
-                completed_steps=completed_steps,
-                log_dir=log_dir,
+                steps_log_dir=steps_log_dir,
                 llm_batch_size=args.llm_batch_size,
             )
 
@@ -237,7 +238,7 @@ def validate(
     avg_prob = total_ans_prob / num_batches
     logger.info(f"Validation loss: {avg_loss}")
     logger.info(f"Validation avg answer prob: {avg_prob}")
-    return {"loss": avg_loss, "avg_prob": avg_prob, **d}
+    return {"loss": avg_loss, "avg_prob": avg_prob, **d, "retriever_pick": all_retriever_pick}
 
 
 # %%
@@ -343,6 +344,7 @@ def main():
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         logger.info("...Deleting doc_encoder...")
         del doc_encoder
+        accelerator.empty_cache()
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
@@ -421,6 +423,12 @@ def main():
 
     start_time = time.time()
 
+    logger.info(f"...0 Step Evaluation...")
+    steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
+    if not os.path.exists(steps_log_dir):
+        os.makedirs(steps_log_dir)
+    loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
@@ -433,11 +441,11 @@ def main():
                     logger.debug("...Sending batch to model...")
                     logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
                     logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
-                    logger.debug(f"query_encoder device: {next(query_encoder.parameters()).device}")
+                    # logger.debug(f"query_encoder device: {next(query_encoder.parameters()).device}")
                     query_embedding = query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
                     doc_embedding = batch["doc_embeddings"]
                     
-                    logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
+                    # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     # shape of both query_embedding and doc_embedding: [bs,n_dim]
                     # where bs = n_comb * num_orig_question
@@ -469,7 +477,6 @@ def main():
                     # delete embeddings
                     del query_embedding
                     del doc_embedding
-
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     logger.debug(f"...Calculating loss from LM on {accelerator.device}...")
@@ -507,15 +514,21 @@ def main():
                     accelerator.log({"training_loss": loss}, step=completed_steps)
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
-                    if completed_steps % EVAL_STEPS == 0:
+                    if completed_steps % EVAL_STEPS == 0 or completed_steps == MAX_TRAIN_STEPS:
                         logger.info(f"...Evaluation...")
-                        loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, completed_steps, LOG_DIR)
+                        steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
+                        if not os.path.exists(steps_log_dir):
+                            os.makedirs(steps_log_dir)
+                        loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
                         query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
                         if accelerator.is_local_main_process:
-                            query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
-                            ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
+                            query_encoder_path = os.path.join(steps_log_dir, "query_encoder")
+                            ensure_directory_exists_for_file(query_encoder_path)
+                            query_encoder.save_pretrained(query_encoder_path)
+                            ret_tokenizer.save_pretrained(query_encoder_path)
+                            logger.info(f"Checkpoint saved to {LOG_DIR}")
                             
                         accelerator.wait_for_everyone()
                 logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
