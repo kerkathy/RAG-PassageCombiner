@@ -114,7 +114,7 @@ class QADataset(torch.utils.data.Dataset):
         return len(self.qa_pairs)
     
     def __getitem__(self, idx):
-        data = self.qa_pairs[idx] # (query, doc, doc_embedding, answer)
+        data = [self.qa_pairs[idx]] # (query, doc, doc_embedding, answer)
         corpus = self.all_corpus[idx]
         doc_embeddings = self.all_doc_embeddings[idx]  # Move to correct device
         cur_prompt_ans = queue.Queue()
@@ -130,6 +130,7 @@ class QADataset(torch.utils.data.Dataset):
                 for docid in doc_ids:
                     next_prompts_ans.put((" ".join([prompt, corpus[docid]]), answer))
                     data.append((prompt, corpus[docid], answer, doc_embeddings[docid].to(embedding_device)))
+        logger.debug(f"After getitem, data size: {len(data)}")
         return data # List of tuples
 
     def collate_fn(self, samples):
@@ -335,8 +336,8 @@ def main():
     with torch.no_grad():
         unk_inputs = ret_tokenizer("[UNK]", return_tensors='pt').to(doc_encoder.device)
         empty_doc_embedding = doc_encoder(**unk_inputs).last_hidden_state.mean(dim=1).squeeze(0)
-    train_qa_pairs = [[(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in train_data]]
-    dev_qa_pairs = [[(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in dev_data]]
+    train_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in train_data]
+    dev_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in dev_data]
 
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
