@@ -36,7 +36,7 @@ from utils import (
 )
 
 debug = True  # set log mode to debug, and stop wandb logging
-take_few_data = True  # train, dev = 10000, 1000. Set this to True to take only a few data for debugging
+take_few_data = True  # train, dev = 200, 100. Set this to True to take only a few data for debugging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -58,26 +58,26 @@ def parse_args():
     args = types.SimpleNamespace(**yaml_config)
     return args
 
-class DualEncoder(nn.Module):
-    def __init__(self,query_encoder,doc_encoder):
-        super().__init__()
-        self.query_encoder = query_encoder
-        self.doc_encoder = doc_encoder
-        # TODO: whether to freeze the doc encoder
+# class DualEncoder(nn.Module):
+#     def __init__(self,query_encoder,doc_encoder):
+#         super().__init__()
+#         self.query_encoder = query_encoder
+#         self.doc_encoder = doc_encoder
+#         # TODO: whether to freeze the doc encoder
 
-    def forward(
-        self,
-        query_inputs, # each [bs,seq_len]
-        doc_inputs, # each [bs*n_comb,seq_len]
-    ):  
-        CLS_POS = 0
-        ## [bs,n_dim]
-        query_embedding = self.query_encoder(**query_inputs).last_hidden_state[:,CLS_POS,:]
+#     def forward(
+#         self,
+#         query_inputs, # each [bs,seq_len]
+#         doc_inputs, # each [bs*n_comb,seq_len]
+#     ):  
+#         CLS_POS = 0
+#         ## [bs,n_dim]
+#         query_embedding = self.query_encoder(**query_inputs).last_hidden_state[:,CLS_POS,:]
         
-        ## [bs*n_comb,n_dim]
-        doc_embedding = self.doc_encoder(**doc_inputs).last_hidden_state[:,CLS_POS,:]
+#         ## [bs*n_comb,n_dim]
+#         doc_embedding = self.doc_encoder(**doc_inputs).last_hidden_state[:,CLS_POS,:]
         
-        return query_embedding,doc_embedding  # [bs,n_dim], [bs*n_comb,n_dim]
+#         return query_embedding,doc_embedding  # [bs,n_dim], [bs*n_comb,n_dim]
 
 def calculate_dpr_loss(matching_score,labels):
     return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
@@ -99,43 +99,39 @@ def calculate_KL_div_loss(
     return loss
 
 class QADataset(torch.utils.data.Dataset):
-    def __init__(self, qa_pairs, all_corpus, doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args, accelerator):
+    def __init__(self, qa_pairs, all_corpus, all_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args, accelerator):
         self.qa_pairs = qa_pairs
         self.all_corpus = all_corpus
-        self.doc_embeddings = doc_embeddings
+        self.all_doc_embeddings = all_doc_embeddings
         self.ret_tokenizer = ret_tokenizer
         self.lm_tokenizer = lm_tokenizer
         self.query_encoder = query_encoder
         self.stage = stage
         self.args = args
-        # self.device = device
         self.accelerator = accelerator
         
     def __len__(self):
         return len(self.qa_pairs)
     
     def __getitem__(self, idx):
-        data = self.qa_pairs[idx]
+        data = self.qa_pairs[idx] # (query, doc, doc_embedding, answer)
         corpus = self.all_corpus[idx]
-        doc_embeddings = self.doc_embeddings[idx]  # Move to correct device
-        # corpus = [x['text'] for x in sample['ctxs']]
-        # data = [(normalize_query(sample['question']), "", sample['answers'][0])] # tmp fix, only use the first answer 
+        doc_embeddings = self.all_doc_embeddings[idx]  # Move to correct device
         cur_prompt_ans = queue.Queue()
         next_prompts_ans = queue.Queue()
+        embedding_device = data[0][3].device
         for d in data:
             next_prompts_ans.put((d[0], d[2]))
-            logger.debug(f"Put data: {(d[0], d[2])}")
-        for _ in range(self.args.num_round):
+        for _ in range(self.args.max_round):
             cur_prompt_ans, next_prompts_ans = next_prompts_ans, cur_prompt_ans
             while not cur_prompt_ans.empty():
                 prompt, answer = cur_prompt_ans.get()
                 doc_ids = retrieve_top_k_docid(prompt, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k, self.accelerator)  # Pass device to function
                 for docid in doc_ids:
-                    doc = corpus[docid]
-                    data.append((prompt, doc, answer))
-                    next_prompts_ans.put((" ".join([prompt, doc]), answer))
-
+                    next_prompts_ans.put((" ".join([prompt, corpus[docid]]), answer))
+                    data.append((prompt, corpus[docid], answer, doc_embeddings[docid].to(embedding_device)))
         return data # List of tuples
+
     def collate_fn(self, samples):
         """
         samples: List[List[tuple]]
@@ -145,26 +141,25 @@ class QADataset(torch.utils.data.Dataset):
         samples = [item for sublist in samples for item in sublist]
         logger.debug(f"Real batch size: {len(samples)}")
         
-        # Tokenize the data
         query_inputs = self.ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
-        doc_inputs = self.ret_tokenizer([x[1] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
+        # collect doc_inputs from doc_embeddings
+        doc_embeddings = torch.stack([x[3] for x in samples], dim=0)
         prompt_ans_lm_inputs = self.lm_tokenizer(
             [" ".join([x[0], x[1]]) for x in samples], 
-            [x[2] for x in samples], 
+            [x[2] for x in samples],
             max_length=256, padding=True, truncation=True, return_tensors='pt',
             return_token_type_ids=True
         )
 
         return {
             "query_inputs": query_inputs,
-            "doc_inputs": doc_inputs,
+            "doc_embeddings": doc_embeddings,
             "prompt_ans_lm_inputs": prompt_ans_lm_inputs,
         }
 
-
-def validate(args, dual_encoder, language_model, validation_dataloader, accelerator, model_max_length):
+def validate(args, query_encoder, language_model, validation_dataloader, accelerator, model_max_length):
     logger.info("*** Start validation ***")
-    dual_encoder.eval()
+    query_encoder.eval()
     language_model.eval()
     total_loss = 0
     total_ans_prob = 0
@@ -174,11 +169,16 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
         with torch.no_grad():
             logger.debug("...Sending batch to model...")
             logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
-            logger.debug(f"batch['doc_inputs']['input_ids']: {batch['doc_inputs']['input_ids'].shape}")
-            query_embedding, doc_embedding = dual_encoder(query_inputs=batch['query_inputs'], doc_inputs=batch['doc_inputs'])
+            logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
+            logger.debug(f"query_encoder device: {next(query_encoder.parameters()).device}")
+            query_embedding = query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
+            doc_embedding = batch["doc_embeddings"]
+            
+            logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
+            logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            
             single_device_query_num, _ = query_embedding.shape
-            single_device_doc_num, _ = doc_embedding.shape
-            logger.debug(f"single_device_query_num: {single_device_query_num}; single_device_doc_num: {single_device_doc_num}")
+            single_device_doc_num = doc_embedding.shape[0]
 
             logger.debug("...Waiting for everyone...")
             if accelerator.use_distributed:
@@ -194,7 +194,7 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
 
             logger.debug("...Calculating loss from DPR...")
             retriever_score = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
-            num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.num_round + 1)])
+            num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
             retriever_score = retriever_score.reshape(num_orig_question, -1)
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
@@ -221,7 +221,7 @@ def validate(args, dual_encoder, language_model, validation_dataloader, accelera
             lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
 
             total_loss += loss.item()
-            avg_ans_prob += lm_score.exp().mean().item()
+            total_ans_prob += lm_score.exp().mean().item()
             num_batches += 1
 
     avg_loss = total_loss / num_batches
@@ -266,12 +266,11 @@ def main():
     ret_tokenizer = BertTokenizer.from_pretrained(args.retriever_model)
     query_encoder = BertModel.from_pretrained(args.retriever_model,add_pooling_layer=False)
     doc_encoder = BertModel.from_pretrained(args.retriever_model,add_pooling_layer=False)
-    dual_encoder = DualEncoder(query_encoder,doc_encoder)
-    dual_encoder.train()
+    doc_encoder.eval()
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
     if not debug and accelerator.is_local_main_process:
-        wandb_tracker.run.watch(dual_encoder, log="all", log_freq=500)
+        wandb_tracker.run.watch(query_encoder, log="all", log_freq=500)
 
     logger.info("...Loading language models...")
     language_model, lm_tokenizer, lm_config, lm_device = load_lm_model_and_tokenizer(
@@ -286,7 +285,7 @@ def main():
     train_data = json.load(open(args.train_file))
 
     if take_few_data:
-        train_data = train_data[:10000]
+        train_data = train_data[:50]
 
     if args.train_file == args.dev_file:
         # random split train and dev data
@@ -296,7 +295,7 @@ def main():
     else:
         dev_data = json.load(open(args.dev_file))
         if take_few_data:
-            dev_data = dev_data[:1000]
+            dev_data = dev_data[:10]
 
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
@@ -322,21 +321,26 @@ def main():
     else:
         logger.info(f"...Creating index...")
         logger.info(f"...Creating train index with size {len(train_corpus)}...")
-        train_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
-        logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
-        dev_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
+        with torch.no_grad():
+            train_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
+            logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
+            dev_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
         torch.save(train_doc_embeddings, args.train_index_path)
         torch.save(dev_doc_embeddings, args.dev_index_path)
         logger.info(f"Index saved to {args.train_index_path} and {args.dev_index_path}")
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
+    # use [UNK]'s representation for empty document
+    # TODO fix here
+    with torch.no_grad():
+        unk_inputs = ret_tokenizer("[UNK]", return_tensors='pt').to(doc_encoder.device)
+        empty_doc_embedding = doc_encoder(**unk_inputs).last_hidden_state.mean(dim=1).squeeze(0)
+    train_qa_pairs = [[(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in train_data]]
+    dev_qa_pairs = [[(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in dev_data]]
+
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-
-    train_qa_pairs = [[(normalize_query(sample['question']), "", sample['answers'][0])] for sample in train_data]
-    logger.debug(f"train_qa_pairs: {train_qa_pairs[:2]}")
-    dev_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0]) for sample in dev_data]
     train_dataset = QADataset(train_qa_pairs, train_corpus, train_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'train', args, accelerator)
     dev_dataset = QADataset(dev_qa_pairs, dev_corpus, dev_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, 'dev', args, accelerator)
     
@@ -347,20 +351,19 @@ def main():
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in dual_encoder.named_parameters() if not any(nd in n for nd in no_decay)],
+            "params": [p for n, p in query_encoder.named_parameters() if not any(nd in n for nd in no_decay)],
             "weight_decay": args.weight_decay,
         },
         {
-            "params": [p for n, p in dual_encoder.named_parameters() if any(nd in n for nd in no_decay)],
+            "params": [p for n, p in query_encoder.named_parameters() if any(nd in n for nd in no_decay)],
             "weight_decay": 0.0,
         },
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters,lr=args.lr, eps=args.adam_eps)
     
     logger.info("...Prepare accelerator...")
-    # add language model to accelerator
-    dual_encoder, optimizer, train_dataloader, dev_dataloader, language_model = accelerator.prepare(
-        dual_encoder, optimizer, train_dataloader, dev_dataloader, language_model 
+    optimizer, train_dataloader, dev_dataloader, language_model = accelerator.prepare(
+        optimizer, train_dataloader, dev_dataloader, language_model 
     )
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
@@ -378,7 +381,7 @@ def main():
     logger.info(f"  Num dev examples = {len(dev_dataset)}")
     logger.info(f"  Num Epochs = {MAX_TRAIN_EPOCHS}")
     logger.info(f"  Per device train batch size = {args.per_device_train_batch_size}")
-    logger.info(f"  Extended train batch size (retriever batch size) = {args.per_device_train_batch_size * sum([args.k ** i for i in range(args.num_round + 1)])}")
+    logger.info(f"  Extended train batch size (retriever batch size) = {args.per_device_train_batch_size * sum([args.k ** i for i in range(args.max_round + 1)])}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {TOTAL_TRAIN_BATCH_SIZE}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {MAX_TRAIN_STEPS}")
@@ -397,22 +400,22 @@ def main():
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         for step,batch in enumerate(train_dataloader):
             logger.debug(f"... Successfully load batches in epoch {epoch} ...")
-            dual_encoder.train()
-            with accelerator.accumulate(dual_encoder): # gradient accumulation
+            query_encoder.train()
+            with accelerator.accumulate(query_encoder): # gradient accumulation
                 with accelerator.autocast():
                     logger.debug("...Sending batch to model...")
                     logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
-                    logger.debug(f"batch['doc_inputs']['input_ids']: {batch['doc_inputs']['input_ids'].shape}")
-                    # TODO check
-                    # makesure_not_cpu(dual_encoder)
-                    logger.debug(f"dual_encoder device: {next(dual_encoder.parameters()).device}")
-                    query_embedding,doc_embedding  = dual_encoder(query_inputs=batch['query_inputs'],doc_inputs=batch['doc_inputs'])
+                    logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
+                    logger.debug(f"query_encoder device: {next(query_encoder.parameters()).device}")
+                    query_embedding = query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
+                    doc_embedding = batch["doc_embeddings"]
+                    
                     logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     # shape of both query_embedding and doc_embedding: [bs,n_dim]
                     # where bs = n_comb * num_orig_question
                     single_device_query_num,_ = query_embedding.shape
-                    single_device_doc_num,_ = doc_embedding.shape
+                    single_device_doc_num = doc_embedding.shape[0]
 
                     logger.debug("...Waiting for everyone...")
                     if accelerator.use_distributed:
@@ -428,7 +431,7 @@ def main():
 
                     logger.debug("...Calculating similarity score from DPR...")
                     retriever_score = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
-                    num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.num_round + 1)])
+                    num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
                     retriever_score = retriever_score.reshape(num_orig_question, -1)
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
@@ -475,7 +478,7 @@ def main():
                     progress_bar.update(1)
                     progress_bar.set_postfix(loss=f"{loss:.4f}",lr=f"{lr_scheduler.get_last_lr()[0]:6f}")
                     completed_steps += 1
-                    accelerator.clip_grad_norm_(dual_encoder.parameters(), args.max_grad_norm)
+                    accelerator.clip_grad_norm_(query_encoder.parameters(), args.max_grad_norm)
                     if not accelerator.optimizer_step_was_skipped:
                         lr_scheduler.step()
                     accelerator.log({"training_loss": loss}, step=completed_steps)
@@ -483,17 +486,18 @@ def main():
                     
                     if completed_steps % EVAL_STEPS == 0:
                         logger.info(f"...Evaluation...")
-                        loss = validate(args,dual_encoder,language_model,dev_dataloader,accelerator,model_max_length)
-                        dual_encoder.train() # Make sure the model is back in training mode
+                        loss = validate(args,query_encoder,language_model,dev_dataloader,accelerator,model_max_length)
+                        query_encoder.train() # Make sure the model is back in training mode
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
                         if accelerator.is_local_main_process:
-                            unwrapped_model = accelerator.unwrap_model(dual_encoder)
-                            unwrapped_model.query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
+                            # unwrapped_model = accelerator.unwrap_model(query_encoder)
+                            # unwrapped_model.query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
+                            query_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
                             ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/query_encoder"))
                             
-                            unwrapped_model.doc_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
-                            ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
+                            # unwrapped_model.doc_encoder.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
+                            # ret_tokenizer.save_pretrained(os.path.join(LOG_DIR,f"step-{completed_steps}/doc_encoder"))
 
                         accelerator.wait_for_everyone()
                 logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
