@@ -1,7 +1,7 @@
 # %%
 ## built-in
 import time,random,queue,sys
-import math,logging,json,random,os, psutil
+import math,logging,json,random,os,psutil
 import types
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 ## own
 from utils import (
+    ensure_directory_exists_for_file,
     get_yaml_file,
     set_seed,
     get_linear_scheduler,
@@ -33,6 +34,7 @@ from utils import (
     retrieve_top_k_docid,
     load_lm_model_and_tokenizer,
     get_lm_score,
+    evaluate_dataset,
 )
 
 debug = True  # set log mode to debug, and stop wandb logging
@@ -136,8 +138,11 @@ class QADataset(torch.utils.data.Dataset):
             "doc_embeddings": doc_embeddings,
             "prompt_ans_lm_inputs": prompt_ans_lm_inputs,
         }
-
-def validate(args, query_encoder, language_model, validation_dataloader, accelerator, model_max_length):
+    
+def validate(
+        query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
+        accelerator, model_max_length, completed_steps, log_dir
+):
     logger.info("*** Start validation ***")
     query_encoder.eval()
     language_model.eval()
@@ -145,8 +150,9 @@ def validate(args, query_encoder, language_model, validation_dataloader, acceler
     total_ans_prob = 0
     num_batches = 0
 
-    for step, batch in enumerate(validation_dataloader):
+    for step, batch in enumerate(dev_dataloader):
         with torch.no_grad():
+            ## Metric 1. Loss
             logger.debug("...Sending batch to model...")
             logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
             logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
@@ -192,23 +198,46 @@ def validate(args, query_encoder, language_model, validation_dataloader, acceler
 
             logger.debug(f"...Calculating loss...: {torch.cuda.memory_allocated() / 1e6} MB")
             loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
+            total_loss += loss.item()
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
-            # TODO for each question, take idx of max retriever_score 
+            ## Metric 2. Average answer probability
+            # for each question, take idx of max retriever_score 
             # get its corresponding lm_score
-            # retriever_score and lm_score are both [n_question,n_comb]
+            # note. retriever_score and lm_score are both [n_question,n_comb]
             retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
             lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
-
-            total_loss += loss.item()
             total_ans_prob += lm_score.exp().mean().item()
+
+            ## Metric 3. Exact match
+            # reshape from [n_question*n_comb,seq_len] to [n_question,n_comb,seq_len]
+            batch['prompt_ans_lm_inputs'] = {
+                k: v.view(num_orig_question, -1, v.shape[-1]) for k,v in batch['prompt_ans_lm_inputs'].items()
+            }
+            # and then take the retriever's pick for each question
+            batch['prompt_ans_lm_inputs'] = {
+                k: v[torch.arange(num_orig_question),retrievers_pick] for k,v in batch['prompt_ans_lm_inputs'].items()
+            }
+            # calculate exact match
+            d = evaluate_dataset(
+                model=language_model, 
+                tokenizer=lm_tokenizer,
+                device=accelerator.device,
+                max_length=model_max_length,
+                prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
+                max_tokens_to_generate=args.max_tokens,
+                completed_steps=completed_steps,
+                log_dir=log_dir,
+                llm_batch_size=args.llm_batch_size,
+            )
+
             num_batches += 1
 
     avg_loss = total_loss / num_batches
     avg_prob = total_ans_prob / num_batches
     logger.info(f"Validation loss: {avg_loss}")
     logger.info(f"Validation avg answer prob: {avg_prob}")
-    return {"loss": avg_loss, "avg_prob": avg_prob}
+    return {"loss": avg_loss, "avg_prob": avg_prob, **d}
 
 
 # %%
@@ -315,6 +344,19 @@ def main():
         logger.info("...Deleting doc_encoder...")
         del doc_encoder
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+
+    gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
+    if not os.path.exists(gold_path):
+        logger.info(f"...Creating gold answers for dev set...")
+        ensure_directory_exists_for_file(gold_path)
+        gold_answers = []
+        for sample in dev_data:
+            gold_answers.append(sample['answers'][0])
+        with open(gold_path, "w") as f:
+            for ans in gold_answers:
+                f.write(ans + "\n")
+        logger.info(f"Gold answers saved to {gold_path}")
+        del gold_answers
 
     train_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in train_data]
     dev_qa_pairs = [(normalize_query(sample['question']), "", sample['answers'][0], empty_doc_embedding) for sample in dev_data]
@@ -467,7 +509,7 @@ def main():
                     
                     if completed_steps % EVAL_STEPS == 0:
                         logger.info(f"...Evaluation...")
-                        loss = validate(args,query_encoder,language_model,dev_dataloader,accelerator,model_max_length)
+                        loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, completed_steps, LOG_DIR)
                         query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
