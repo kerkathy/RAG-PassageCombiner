@@ -234,11 +234,16 @@ def validate(
 
             num_batches += 1
 
+    # write retriever pick to steps_log_dir
+    with open(os.path.join(steps_log_dir, "retriever_pick.txt"), "w") as f:
+        for pick in all_retriever_pick:
+            f.write(str(pick) + "\n")
+
     avg_loss = total_loss / num_batches
     avg_prob = total_ans_prob / num_batches
     logger.info(f"Validation loss: {avg_loss}")
     logger.info(f"Validation avg answer prob: {avg_prob}")
-    return {"loss": avg_loss, "avg_prob": avg_prob, **d, "retriever_pick": all_retriever_pick}
+    return {"loss": avg_loss, "avg_prob": avg_prob, **d}
 
 
 # %%
@@ -537,13 +542,13 @@ def main():
                 optimizer.zero_grad()
                 logger.debug(f"Finish step {step}.\n GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
-    logger.info(f"Time spent: {time.time() - start_time} seconds")
-    logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
-    logger.info("...!!Congrats!! Training finished :) ...")
-    logger.info(f"Checkpoint saved to {LOG_DIR}")
-
-    if not debug and accelerator.is_local_main_process:
-        wandb_tracker.finish()
+    if accelerator.is_local_main_process:
+        logger.info(f"Time spent: {time.time() - start_time} seconds")
+        logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+        logger.info("...!!Congrats!! Training finished :) ...")
+        logger.info(f"Checkpoint saved to {LOG_DIR}")
+        if not debug:
+            wandb_tracker.finish()
     
     accelerator.end_training()
 
