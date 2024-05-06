@@ -94,7 +94,10 @@ def make_index(corpus, tokenizer, encoder, batch_size=32):
             inputs = tokenizer(batch, return_tensors='pt', truncation=True, padding=True)
             inputs = {name: tensor.to(encoder.device) for name, tensor in inputs.items()}
             outputs = encoder(**inputs)
-            embeddings = outputs.last_hidden_state.mean(dim=1)
+            if "dpr" == encoder.config.model_type:
+                embeddings = outputs.pooler_output
+            else:
+                embeddings = outputs.last_hidden_state.mean(dim=1)
             embeddings_list.extend(embeddings.tolist())
     return torch.tensor(embeddings_list)
 

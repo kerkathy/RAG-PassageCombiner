@@ -12,10 +12,6 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs
 import transformers
-from transformers import (
-    BertTokenizer,
-    BertModel,
-)
 transformers.logging.set_verbosity_error()
 import torch
 import torch.nn as nn
@@ -37,8 +33,9 @@ from utils import (
     evaluate_dataset,
 )
 
-debug = False  # set log mode to debug, and stop wandb logging
-take_few_data = True  # train, dev = 200, 100. Set this to True to take only a few data for debugging
+debug = True  # set log mode to debug, and stop wandb logging
+data_size = "debug"
+# "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -151,7 +148,7 @@ def validate(
     num_batches = 0
     all_retriever_pick = []
 
-    for step, batch in enumerate(dev_dataloader):
+    for step, batch in tqdm(enumerate(dev_dataloader)):
         with torch.no_grad():
             ## Metric 1. Loss
             logger.debug("...Sending batch to model...")
@@ -267,7 +264,7 @@ def main():
     accelerator.init_trackers(
         project_name="dpr", 
         config=args,
-        init_kwargs={"wandb":{"name":"batch size=3"}},
+        init_kwargs={"wandb":{"name":"(train 10K) bs(train/dev)=10/4, round=1, k=3, effective=130/52"}},
     )
         
     if not debug and accelerator.is_local_main_process:
@@ -278,9 +275,20 @@ def main():
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
 
     logger.info("...Loading retriever models...")
-    ret_tokenizer = BertTokenizer.from_pretrained(args.retriever_model)
-    query_encoder = BertModel.from_pretrained(args.retriever_model,add_pooling_layer=False)
-    doc_encoder = BertModel.from_pretrained(args.retriever_model,add_pooling_layer=False)
+    if "dpr" in args.retriever_model:
+        from transformers import DPRContextEncoder, DPRContextEncoderTokenizer
+        ret_tokenizer = DPRContextEncoderTokenizer.from_pretrained(args.retriever_model)
+        doc_encoder = DPRContextEncoder.from_pretrained(args.retriever_model)
+    elif "t5" in args.retriever_model:
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+        ret_tokenizer = AutoTokenizer.from_pretrained(args.retriever_model)
+        query_encoder = AutoModelForSeq2SeqLM.from_pretrained(args.retriever_model)
+        doc_encoder = AutoModelForSeq2SeqLM.from_pretrained(args.retriever_model)
+    else:
+        from transformers import BertTokenizer, BertModel
+        ret_tokenizer = BertTokenizer.from_pretrained(args.retriever_model)
+        query_encoder = BertModel.from_pretrained(args.retriever_model,add_pooling_layer=False)
+        doc_encoder = BertModel.from_pretrained(args.retriever_model,add_pooling_layer=False)
     doc_encoder.eval()
     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
@@ -299,7 +307,9 @@ def main():
     logger.info("...Loading data...")
     train_data = json.load(open(args.train_file))
 
-    if take_few_data:
+    if data_size == "1/10":
+        train_data = train_data[:10000]
+    elif data_size == "debug":
         train_data = train_data[:50]
 
     if args.train_file == args.dev_file:
@@ -309,7 +319,9 @@ def main():
         train_data = train_data[len(train_data)//10:]
     else:
         dev_data = json.load(open(args.dev_file))
-        if take_few_data:
+        if data_size == "1/10":
+            dev_data = dev_data[:1000]
+        elif data_size == "debug":
             dev_data = dev_data[:10]
 
     logger.info(f"Size of train data: {len(train_data)}")
@@ -434,6 +446,7 @@ def main():
         os.makedirs(steps_log_dir)
     loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
 
+    logger.info(f"...Start Training...")
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
@@ -520,6 +533,7 @@ def main():
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
                     if completed_steps % EVAL_STEPS == 0 or completed_steps == MAX_TRAIN_STEPS:
+                        logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                         logger.info(f"...Evaluation...")
                         steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
                         if not os.path.exists(steps_log_dir):
@@ -536,7 +550,6 @@ def main():
                             logger.info(f"Checkpoint saved to {LOG_DIR}")
                             
                         accelerator.wait_for_everyone()
-                logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                 
                 optimizer.step()
                 optimizer.zero_grad()

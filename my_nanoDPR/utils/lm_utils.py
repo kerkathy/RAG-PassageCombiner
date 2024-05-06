@@ -3,11 +3,11 @@ import os
 import re
 import string
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, T5Tokenizer, T5ForConditionalGeneration
-from tqdm import tqdm
+from transformers import AutoConfig, AutoTokenizer
 
 def load_lm_tokenizer(model_name):
     if "llama" in model_name:
+        from transformers import LlamaTokenizer
         return LlamaTokenizer.from_pretrained(model_name)
     return AutoTokenizer.from_pretrained(model_name)
 
@@ -28,7 +28,12 @@ def load_lm_model_and_tokenizer(model_name, model_parallelism=False, cache_dir=N
     if auth_token is not None:
         model_args["use_auth_token"] = auth_token
 
-    model = AutoModelForCausalLM.from_pretrained(model_name, **model_args).eval()
+    if "flan" in model_name:
+        from transformers import AutoModelForSeq2SeqLM
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **model_args).eval()
+    else:
+        from transformers import AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_args).eval()
     if not model_parallelism:
         model = model.to(device)
     tokenizer = load_lm_tokenizer(model_name)
@@ -68,7 +73,10 @@ def get_lm_score(
         attention_mask_batch = attention_mask_batch.to(device)
         token_type_ids_batch = token_type_ids_batch.to(device)
         with torch.no_grad():
-            outputs = model(input_ids_batch, attention_mask=attention_mask_batch).logits
+            if "flan" in model.name_or_path:
+                outputs = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch, decoder_input_ids=input_ids_batch).logits
+            else:
+                outputs = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch).logits
             outputs = torch.log_softmax(outputs, dim=-1).detach()
             all_outputs.append(outputs)
     outputs = torch.cat(all_outputs, dim=0)
@@ -82,14 +90,13 @@ def get_lm_score(
     outputs[token_type_ids == 0] = 0 # [ext_batch_size, seq_len]
 
     # compute sequence scores
-    # option 1. sum of neg log probabilities 
+    # option 1. sum of neg log probabilities
     outputs = outputs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
     # option 2. joint probability
     # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
 
     return outputs # [num_orig_question, n_comb]
 
-# TODO 
 def normalize_question(question):
     if not question.endswith("?"):
         question = question + "?"
@@ -154,7 +161,7 @@ def evaluate_dataset(
             num_too_long += 1
             prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
-    for input_ids_batch, prompt_length_batch in tqdm(zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size))):
+    for input_ids_batch, prompt_length_batch in zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size)):
         with torch.no_grad():
             output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
             all_predictions.extend(get_batch_answer_from_model_output(output_batch, tokenizer, prompt_length_batch))
@@ -167,7 +174,7 @@ def evaluate_dataset(
 
     num_data = len(prompt_lengths)
     em = num_correct / num_data * 100
-    print(f"EM: {em:.1f}%")
+    # print(f"EM: {em:.1f}%")
 
     d = {"em": em, "num_examples": num_data, "too_long": num_too_long}
 
