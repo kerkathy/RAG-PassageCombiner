@@ -262,7 +262,7 @@ def main():
     accelerator.init_trackers(
         project_name="dpr", 
         config=args,
-        init_kwargs={"wandb":{"name":"(train 10K) bs(train/dev)=10/4, round=1, k=3, effective=130/52"}},
+        init_kwargs={"wandb":{"name":f"({args.data_size}) flan-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})"}}
     )
         
     if not debug and accelerator.is_local_main_process:
