@@ -62,11 +62,6 @@ def get_lm_score(
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
 
-    # model = model.to(device)
-    # print("LM model device: ", model.device)
-    # print("input_ids device: ", input_ids.device)
-    # print("attention_mask device: ", attention_mask.device)
-    # print("token_type_ids device: ", token_type_ids.device)
     all_outputs = []
     for input_ids_batch, attention_mask_batch, token_type_ids_batch in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size), token_type_ids.split(llm_batch_size)):
         input_ids_batch = input_ids_batch.to(device)
@@ -74,28 +69,30 @@ def get_lm_score(
         token_type_ids_batch = token_type_ids_batch.to(device)
         with torch.no_grad():
             if "flan" in model.name_or_path:
-                outputs = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch, decoder_input_ids=input_ids_batch).logits
+                outputs_batch = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch, decoder_input_ids=input_ids_batch).logits
             else:
-                outputs = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch).logits
-            outputs = torch.log_softmax(outputs, dim=-1).detach()
-            all_outputs.append(outputs)
-    outputs = torch.cat(all_outputs, dim=0)
+                outputs_batch = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch).logits
+            outputs_batch = torch.log_softmax(outputs_batch, dim=-1).detach()
+        
+        # collect the probability of the generated token -- probability at index 0 corresponds to the token at index 1
+        outputs_batch, input_ids_batch = outputs_batch[:, :-1, :], input_ids_batch[:, 1:]
+        outputs_batch = torch.gather(outputs_batch, 2, input_ids_batch[:, :, None]).squeeze(-1) # [ext_batch_size, seq_len, 1] -> [ext_batch_size, seq_len]
+        all_outputs.append(outputs_batch)
     
-    # collect the probability of the generated token -- probability at index 0 corresponds to the token at index 1
-    outputs = outputs[:, :-1, :]
-    input_ids, token_type_ids = input_ids[:, 1:], token_type_ids[:, 1:]
-    outputs = torch.gather(outputs, 2, input_ids[:, :, None]).squeeze(-1) # [ext_batch_size, seq_len, 1] -> [ext_batch_size, seq_len]
+    all_outputs = torch.cat(all_outputs, dim=0)
+    token_type_ids = token_type_ids[:, 1:]
     
     # set the log probs to 0 where token_type_ids = 0
-    outputs[token_type_ids == 0] = 0 # [ext_batch_size, seq_len]
+    print("all_outputs.shape: ", all_outputs.shape, ", token_type_ids.shape: ", token_type_ids.shape)
+    all_outputs[token_type_ids == 0] = 0 # [ext_batch_size, seq_len]
 
     # compute sequence scores
     # option 1. sum of neg log probabilities
-    outputs = outputs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
+    all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
     # option 2. joint probability
     # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
 
-    return outputs # [num_orig_question, n_comb]
+    return all_outputs # [num_orig_question, n_comb]
 
 def normalize_question(question):
     if not question.endswith("?"):
