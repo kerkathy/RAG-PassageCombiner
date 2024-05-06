@@ -33,9 +33,7 @@ from utils import (
     evaluate_dataset,
 )
 
-debug = True  # set log mode to debug, and stop wandb logging
-data_size = "debug"
-# "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
+debug = False  # set log mode to debug, and stop wandb logging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -307,9 +305,9 @@ def main():
     logger.info("...Loading data...")
     train_data = json.load(open(args.train_file))
 
-    if data_size == "1/10":
+    if args.data_size == "1/10":
         train_data = train_data[:10000]
-    elif data_size == "debug":
+    elif args.data_size == "debug":
         train_data = train_data[:50]
 
     if args.train_file == args.dev_file:
@@ -319,9 +317,9 @@ def main():
         train_data = train_data[len(train_data)//10:]
     else:
         dev_data = json.load(open(args.dev_file))
-        if data_size == "1/10":
+        if args.data_size == "1/10":
             dev_data = dev_data[:1000]
-        elif data_size == "debug":
+        elif args.data_size == "debug":
             dev_data = dev_data[:10]
 
     logger.info(f"Size of train data: {len(train_data)}")
