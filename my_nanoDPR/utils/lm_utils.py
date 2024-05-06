@@ -83,7 +83,6 @@ def get_lm_score(
     token_type_ids = token_type_ids[:, 1:]
     
     # set the log probs to 0 where token_type_ids = 0
-    print("all_outputs.shape: ", all_outputs.shape, ", token_type_ids.shape: ", token_type_ids.shape)
     all_outputs[token_type_ids == 0] = 0 # [ext_batch_size, seq_len]
 
     # compute sequence scores
