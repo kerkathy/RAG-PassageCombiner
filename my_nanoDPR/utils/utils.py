@@ -67,17 +67,15 @@ def get_linear_scheduler(
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
-def get_sentence_embedding(doc, tokenizer, model, accelerator):
-    # model = model.to(device)
+def get_sentence_embedding(doc, tokenizer, model):
     inputs = tokenizer(doc, return_tensors='pt', truncation=True, padding=True)
-    # print("Prepare tokenizer returns by accelerator...")
-    # inputs = {name: accelerator.prepare(tensor) for name, tensor in inputs.items()}
     inputs = {name: tensor.to(model.device) for name, tensor in inputs.items()}
-    # print("inputs device: ", inputs['input_ids'].device)
-    # print("model device: ", model.device)
     outputs = model(**inputs)
-    # print("outputs device: ", model.device)
-    return outputs.last_hidden_state.mean(dim=1)
+    if "dpr" == model.config.model_type:
+        embeddings = outputs.pooler_output
+    else:
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+    return embeddings
 
 def make_index(corpus, tokenizer, encoder, batch_size=32):
     """
@@ -91,22 +89,16 @@ def make_index(corpus, tokenizer, encoder, batch_size=32):
     with torch.no_grad():
         for i in range(0, len(corpus), batch_size):
             batch = [normalize_document(doc) for doc in corpus[i:i+batch_size]]
-            inputs = tokenizer(batch, return_tensors='pt', truncation=True, padding=True)
-            inputs = {name: tensor.to(encoder.device) for name, tensor in inputs.items()}
-            outputs = encoder(**inputs)
-            if "dpr" == encoder.config.model_type:
-                embeddings = outputs.pooler_output
-            else:
-                embeddings = outputs.last_hidden_state.mean(dim=1)
+            embeddings = get_sentence_embedding(batch, tokenizer, encoder)
             embeddings_list.extend(embeddings.tolist())
     return torch.tensor(embeddings_list)
 
-def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k, accelerator):  
+def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k):  
     """
     Compute cosine similarity between query and documents in the doc_index
     return top k documents
     """
-    query_embedding = get_sentence_embedding(query, tokenizer, query_encoder, accelerator)  
+    query_embedding = get_sentence_embedding(query, tokenizer, query_encoder)  
     # query_embedding, doc_embeddings = query_embedding.to(device), doc_embeddings.to(device)
     # query_embedding, doc_embeddings = accelerator.prepare(query_embedding), accelerator.prepare(doc_embeddings) # this line cause error: device mismatch with one on cpu and one on cuda
     # print(f"query_embedding at {query_embedding.device}; doc_embeddings at {doc_embeddings.device}")

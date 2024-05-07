@@ -102,7 +102,7 @@ class QADataset(torch.utils.data.Dataset):
             cur_prompt_ans, next_prompts_ans = next_prompts_ans, cur_prompt_ans
             while not cur_prompt_ans.empty():
                 prompt, answer = cur_prompt_ans.get()
-                doc_ids = retrieve_top_k_docid(prompt, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k, self.accelerator)  # Pass device to function
+                doc_ids = retrieve_top_k_docid(prompt, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k)  # Pass device to function
                 for docid in doc_ids:
                     next_prompts_ans.put((" ".join([prompt, corpus[docid]]), answer))
                     data.append((prompt, corpus[docid], answer, doc_embeddings[docid].to(embedding_device)))
@@ -344,14 +344,13 @@ def main():
         doc_encoder = accelerator.prepare(doc_encoder)
         logger.info(f"doc_encoder is on {doc_encoder.device}")
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-        logger.info(f"...Creating train index with size {len(train_corpus)}...")
         with torch.no_grad():
+            logger.info(f"...Creating train index with size {len(train_corpus)}...")
             train_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
             logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
             dev_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
             # use [UNK]'s representation for empty document
-            unk_inputs = ret_tokenizer("[UNK]", return_tensors='pt').to(doc_encoder.device)
-            empty_doc_embedding = doc_encoder(**unk_inputs).last_hidden_state.mean(dim=1).squeeze(0)
+            empty_doc_embedding = make_index(["[UNK]"], ret_tokenizer, doc_encoder).squeeze()
         torch.save(train_doc_embeddings, args.train_index_path)
         torch.save(dev_doc_embeddings, args.dev_index_path)
         torch.save(empty_doc_embedding, args.empty_doc_embedding_path)
