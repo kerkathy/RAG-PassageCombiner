@@ -37,10 +37,9 @@ def load_lm_tokenizer(model_name):
         return LlamaTokenizer.from_pretrained(model_name)
     return AutoTokenizer.from_pretrained(model_name)
 
-def load_lm_model_and_tokenizer(model_name, model_parallelism=False, cache_dir=None, auth_token=None):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    assert device == "cuda", "CPU not supported!!!!"
+def load_lm_model_and_tokenizer(model_name, device, model_parallelism=False, cache_dir=None, auth_token=None):
     device_count = torch.cuda.device_count()
+    assert 'cuda' in device.type, "CPU not supported!!!!"
 
     config = AutoConfig.from_pretrained(model_name)
     model_args = {}
@@ -64,10 +63,11 @@ def load_lm_model_and_tokenizer(model_name, model_parallelism=False, cache_dir=N
         model = model.to(device)
     tokenizer = load_lm_tokenizer(model_name)
 
+    # TODO 感覺會跟 accelerator 有衝突
     if device_count > 1 and not model_parallelism:
         model = torch.nn.DataParallel(model)
 
-    return model, tokenizer, config, device
+    return model, tokenizer, config
 
 
 def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False):

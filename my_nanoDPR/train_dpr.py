@@ -307,8 +307,8 @@ def main():
         wandb_tracker.run.watch(query_encoder, log="all", log_freq=500)
 
     logger.info("...Loading language models...")
-    language_model, lm_tokenizer, lm_config, lm_device = load_lm_model_and_tokenizer(
-        args.lm_model, model_parallelism=args.model_parallelism, cache_dir=args.cache_dir, auth_token=args.auth_token
+    language_model, lm_tokenizer, lm_config = load_lm_model_and_tokenizer(
+        args.lm_model, device=accelerator.device, model_parallelism=args.model_parallelism, cache_dir=args.cache_dir, auth_token=args.auth_token
     )
     model_max_length = lm_config.n_positions if hasattr(lm_config, "n_positions") else lm_config.max_position_embeddings
     lm_tokenizer.pad_token = "[PAD]"
@@ -370,20 +370,24 @@ def main():
         logger.info(f"doc_encoder is on {doc_encoder.device}")
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         with torch.no_grad():
-            logger.info(f"...Creating train index with size {len(train_corpus)}...")
-            train_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
-            logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
-            dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
-            empty_doc_embedding = make_index(["[UNK]"], doc_tokenizer, doc_encoder).squeeze() # for empty document
-        torch.save(train_doc_embeddings, args.train_index_path)
-        torch.save(dev_doc_embeddings, args.dev_index_path)
-        torch.save(empty_doc_embedding, args.empty_doc_embedding_path)
+            if not os.path.exists(args.train_index_path):
+                logger.info(f"...Creating train index with size {len(train_corpus)}...")
+                train_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
+                torch.save(train_doc_embeddings, args.train_index_path)
+            if not os.path.exists(args.dev_index_path):
+                logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
+                dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
+                torch.save(dev_doc_embeddings, args.dev_index_path)
+            if not os.path.exists(args.empty_doc_embedding_path):
+                logger.info(f"...Creating empty embedding ...")
+                empty_doc_embedding = make_index(["[UNK]"], doc_tokenizer, doc_encoder).squeeze() # for empty document
+                torch.save(empty_doc_embedding, args.empty_doc_embedding_path)
         logger.info(f"Index saved to {args.train_index_path}, {args.dev_index_path}, {args.empty_doc_embedding_path}")
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
         logger.info("...Deleting doc_encoder...")
         del doc_encoder
-        accelerator.empty_cache()
+        torch.cuda.empty_cache()
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
