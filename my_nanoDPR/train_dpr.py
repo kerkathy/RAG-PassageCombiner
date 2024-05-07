@@ -157,6 +157,7 @@ def validate(
             query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
                 if "dpr" in args.query_encoder \
                 else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
+            doc_embedding = batch["doc_embeddings"]
             
             # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
@@ -442,11 +443,11 @@ def main():
     completed_steps = 0
 
     # TODO restore after debug
-    # logger.info(f"\n...0 Step Evaluation...")
-    # steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
-    # if not os.path.exists(steps_log_dir):
-    #     os.makedirs(steps_log_dir)
-    # loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+    logger.info(f"\n...0 Step Evaluation...")
+    steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
+    if not os.path.exists(steps_log_dir):
+        os.makedirs(steps_log_dir)
+    loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
 
     logger.info("\n***** Running training *****")
     logger.info(f"  Num workers = {args.num_workers}")

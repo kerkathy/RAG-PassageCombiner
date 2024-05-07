@@ -200,7 +200,7 @@ def get_batch_answer_from_model_output(outputs, tokenizer, prompt_lengths):
 
 def evaluate_dataset(
         model, tokenizer, device, max_length, prompt_ans_lm_inputs,
-        max_tokens_to_generate=10, steps_log_dir=".", llm_batch_size=1
+        max_tokens_to_generate=10, train_step_logdir=".", llm_batch_size=1
 ):
     num_correct = 0
     num_too_long = 0
@@ -233,13 +233,12 @@ def evaluate_dataset(
 
     num_data = len(prompt_lengths)
     em = num_correct / num_data * 100
-    # print(f"EM: {em:.1f}%")
 
     d = {"em": em, "num_examples": num_data, "too_long": num_too_long}
 
-    with open(os.path.join(steps_log_dir, "eval.json"), "w", encoding='utf-8') as f:
+    with open(os.path.join(train_step_logdir, "eval.json"), "w", encoding='utf-8') as f:
         f.write(json.dumps(d) + "\n")
-    with open(os.path.join(steps_log_dir, "prediction.json"), "w", encoding='utf-8') as f:
+    with open(os.path.join(train_step_logdir, "prediction.json"), "w", encoding='utf-8') as f:
         for item in all_predictions:
             f.write(item + "\n")
 
