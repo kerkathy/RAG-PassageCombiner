@@ -2,5 +2,5 @@
     # --multi_gpu \
     # --debug \
 accelerate launch \
-    --gpu_ids 0 \
-    make_dev_index.py
+    --gpu_ids 1 \
+    build_dev_indx.py

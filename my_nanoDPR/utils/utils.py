@@ -43,7 +43,6 @@ def get_yaml_file(file_path):
         config = yaml.safe_load(file)  
     return config  
 
-
 def get_linear_scheduler(
     optimizer,
     warmup_steps,

@@ -3,23 +3,24 @@ train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduc
 dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev/formatted-ms2.nq-dev.hits-100.json
 
 ## training
-# debug: set num_worker=0, pin_memory=False
-retriever_model: facebook/contriever # facebook/dpr-ctx_encoder-single-nq-base
+doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
+query_encoder: facebook/dpr-question_encoder-single-nq-base
 lm_model: google/flan-t5-large # gpt2 
 model_parallelism: False
-# train_index_path: embeddings/train_50.pt
-# dev_index_path: embeddings/dev_10.pt
-train_index_path: embeddings/train_10000.pt # embeddings/contriever/train_10000.pt
-dev_index_path: embeddings/dev_1000.pt # embeddings/contriever/dev_1000.pt
-data_size: "1/10"
+train_index_path: embeddings/dpr/train_50.pt
+dev_index_path: embeddings/dpr/dev_10.pt
+# train_index_path: embeddings/dpr/train_10000.pt # embeddings/contriever/train_10000.pt
+# dev_index_path: embeddings/dpr/dev_1000.pt # embeddings/contriever/dev_1000.pt
+data_size: "debug"
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
-empty_doc_embedding_path: embeddings/empty_doc_embedding.pt
+empty_doc_embedding_path: embeddings/contriever/empty_doc_embedding.pt
 gold_dev_answers_path: results/nq-dev-answers.json
 max_round: 2
 k: 3
-per_device_train_batch_size: 10
-per_device_eval_batch_size: 4
-llm_batch_size: 32
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+llm_batch_size: 10
+# debug: set num_worker=0, pin_memory=False
 num_workers: 0
 pin_memory: False
 auth_token: None
