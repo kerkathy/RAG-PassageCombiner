@@ -3,6 +3,7 @@ import os
 import re
 import string
 import torch
+from torch.nn import CrossEntropyLoss
 from transformers import AutoConfig, AutoTokenizer
 
 def normalize_question(question):
@@ -39,7 +40,7 @@ def load_lm_tokenizer(model_name):
 
 def load_lm_model_and_tokenizer(model_name, device, model_parallelism=False, cache_dir=None, auth_token=None):
     device_count = torch.cuda.device_count()
-    assert 'cuda' in device.type, "CPU not supported!!!!"
+    assert 'cuda' in device.type, f"CPU not supported!!!! You are using {device.type} device."
 
     config = AutoConfig.from_pretrained(model_name)
     model_args = {}
@@ -81,16 +82,23 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_
     prompt_input_ids = input_ids * prompt_mask.to(device) # [bs, seq_len]
     prompt_input_ids[prompt_input_ids == 0] = tokenizer.pad_token_id
     prompt_lengths = prompt_mask.sum(dim=1)
+    # decode the prompt ids to check if the prompt is correct
+    prompt_strs = tokenizer.batch_decode(prompt_input_ids.cpu(), skip_special_tokens=True)
+    print("Separated prompt: ", prompt_strs)
 
     if return_ans:
         ans_input_ids = input_ids * ~prompt_mask.to(device) # [bs, seq_len]
+        # decode the answer ids to check if the answer is correct
+        ans_strs = tokenizer.batch_decode(ans_input_ids.cpu(), skip_special_tokens=True)
+        print("Separated answer: ", ans_strs)
         return prompt_input_ids, prompt_lengths, ans_input_ids
 
     return prompt_input_ids, prompt_lengths
 
 
+# TODO check if arguments are correct when calling function
 def get_t5_lm_score(
-    input_ids, attention_mask, token_type_ids,
+    input_ids, labels,
     model, device, tokenizer,
     max_length, max_tokens_to_generate, 
     num_orig_question, llm_batch_size=1,
@@ -108,34 +116,25 @@ def get_t5_lm_score(
     Then we feed the prompt to the encoder and the answer to the decoder.
     In that case, output of decoder is of has length of the answer, rather than the prompt_ans pair.
     """
+    num_too_long = 0
     if input_ids.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
+    print("Num too long: ", num_too_long)
 
-    all_outputs = []
-    for input_ids_batch, attention_mask_batch, token_type_ids_batch \
-    in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size), token_type_ids.split(llm_batch_size)):
+    log_probs = []
+    for input_ids_batch, labels_batch \
+    in zip(input_ids.split(llm_batch_size), labels.split(llm_batch_size)):
         input_ids_batch = input_ids_batch.to(device)
-        attention_mask_batch = attention_mask_batch.to(device)
-        token_type_ids_batch = token_type_ids_batch.to(device)
+        labels_batch = labels_batch.to(device)
         with torch.no_grad():
-            prompt_input_ids, _, ans_input_ids = separate_prompt_answer(input_ids_batch, token_type_ids_batch, tokenizer, device, return_ans=True)
-            outputs_batch = model(input_ids=prompt_input_ids, attention_mask=attention_mask_batch, labels=ans_input_ids).logits # [ext_batch_size, ANS_seq_len, vocab_size]
-            outputs_batch = torch.log_softmax(outputs_batch, dim=-1).detach()
-        # Unlike other models, inside T5 the outputs are already shifted by 1.
-        outputs_batch = torch.gather(outputs_batch, 2, ans_input_ids[:, :, None]).squeeze(-1) # [ext_batch_size, seq_len, 1] -> [ext_batch_size, seq_len]
-        all_outputs.append(outputs_batch)
-    
-    all_outputs = torch.cat(all_outputs, dim=0)
-    token_type_ids = token_type_ids[:, 1:]
-    
-    # compute sequence scores
-    # option 1. sum of neg log probabilities
-    all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
-    # option 2. joint probability
-    # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
+            logits_batch = model(input_ids=input_ids, labels=labels_batch).logits
+            eff_batch_size, seq_len = logits_batch.shape[:2]
+            ce_fn = CrossEntropyLoss(reduction="none", ignore_index=tokenizer.pad_token_id)
+            log_probs_batch = -ce_fn(logits_batch.view(-1, logits_batch.shape[-1]), labels_batch.view(-1))
+        log_probs.append(log_probs_batch.view(eff_batch_size, -1, seq_len).sum(dim=-1)) # [n_question_batch, n_comb]
 
-    return all_outputs # [num_orig_question, n_comb]
+    return torch.cat(log_probs, dim=0).view(num_orig_question, -1) # [num_orig_question, n_comb]
 
 
 def get_lm_score(
@@ -150,9 +149,11 @@ def get_lm_score(
     The return value is NOT a distribution, but a log probability.
     Note: ext_batch_size here = num_orig_question * n_comb
     """
+    num_too_long = 0
     if input_ids.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
+    print("Num too long: ", num_too_long)
 
     all_outputs = []
     for input_ids_batch, attention_mask_batch in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size)):
@@ -176,7 +177,7 @@ def get_lm_score(
     all_outputs[token_type_ids == 0] = 0 # [ext_batch_size, seq_len]
 
     # compute sequence scores
-    # option 1. sum of neg log probabilities
+    # option 1. sum of log probabilities
     all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
     # option 2. joint probability
     # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
