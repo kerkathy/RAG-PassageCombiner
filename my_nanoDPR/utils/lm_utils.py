@@ -84,19 +84,18 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_
     prompt_lengths = prompt_mask.sum(dim=1)
     # decode the prompt ids to check if the prompt is correct
     prompt_strs = tokenizer.batch_decode(prompt_input_ids.cpu(), skip_special_tokens=True)
-    print("Separated prompt: ", prompt_strs)
+    # print("Separated prompt: ", prompt_strs)
 
     if return_ans:
         ans_input_ids = input_ids * ~prompt_mask.to(device) # [bs, seq_len]
         # decode the answer ids to check if the answer is correct
         ans_strs = tokenizer.batch_decode(ans_input_ids.cpu(), skip_special_tokens=True)
-        print("Separated answer: ", ans_strs)
+        # print("Separated answer: ", ans_strs)
         return prompt_input_ids, prompt_lengths, ans_input_ids
 
     return prompt_input_ids, prompt_lengths
 
 
-# TODO check if arguments are correct when calling function
 def get_t5_lm_score(
     input_ids, labels,
     model, device, tokenizer,
@@ -116,6 +115,11 @@ def get_t5_lm_score(
     Then we feed the prompt to the encoder and the answer to the decoder.
     In that case, output of decoder is of has length of the answer, rather than the prompt_ans pair.
     """
+    # print("...In get_t5_lm_score...")
+    # print("input_ids.shape: ", input_ids.shape)
+    # print("labels.shape: ", labels.shape)
+    # print("llm_batch_size: ", llm_batch_size)
+
     num_too_long = 0
     if input_ids.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
@@ -128,13 +132,19 @@ def get_t5_lm_score(
         input_ids_batch = input_ids_batch.to(device)
         labels_batch = labels_batch.to(device)
         with torch.no_grad():
-            logits_batch = model(input_ids=input_ids, labels=labels_batch).logits
+            logits_batch = model(input_ids=input_ids_batch, labels=labels_batch).logits
             eff_batch_size, seq_len = logits_batch.shape[:2]
-            ce_fn = CrossEntropyLoss(reduction="none", ignore_index=tokenizer.pad_token_id)
-            log_probs_batch = -ce_fn(logits_batch.view(-1, logits_batch.shape[-1]), labels_batch.view(-1))
+            ce_fn = CrossEntropyLoss(
+                reduction="none", ignore_index=tokenizer.pad_token_id)
+            log_probs_batch = -ce_fn(
+                logits_batch.view(-1, logits_batch.shape[-1]), labels_batch.view(-1))
+            
         log_probs.append(log_probs_batch.view(eff_batch_size, -1, seq_len).sum(dim=-1)) # [n_question_batch, n_comb]
-
-    return torch.cat(log_probs, dim=0).view(num_orig_question, -1) # [num_orig_question, n_comb]
+        # print("log_probs_batch.shape: ", log_probs[-1].shape)
+    log_probs = torch.cat(log_probs, dim=0)
+    # print("Concated log_probs.shape: ", log_probs.shape, "\n")
+    # print("log_probs: ", log_probs)
+    return log_probs.view(num_orig_question, -1) # [num_orig_question, n_comb]""
 
 
 def get_lm_score(
@@ -185,12 +195,10 @@ def get_lm_score(
     return all_outputs # [num_orig_question, n_comb]
 
 
-def get_batch_answer_from_model_output(outputs, tokenizer, prompt_lengths):
+def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
     """
     For evaluation. Given a batch of model outputs, return the answer strings
     """
-    generation_strs = tokenizer.batch_decode(outputs.cpu(), skip_special_tokens=True)
-    
     answers = []
     for i, generation_str in enumerate(generation_strs):
         generation_str = generation_str[prompt_lengths[i]:]
@@ -207,26 +215,41 @@ def evaluate_dataset(
     num_too_long = 0
     all_predictions = []
 
-    input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
-    token_type_ids = prompt_ans_lm_inputs["token_type_ids"].to(device) # token_type_ids = 0 for prompt, 1 for answer
-
-    # get decoded answers
-    answers = [tokenizer.decode(input_ids[i, token_type_ids[i] == 1], skip_special_tokens=True) for i in range(input_ids.shape[0])]
-
-    # extract prompt ids and prompt lengths from input_ids
-    all_prompt_input_ids, prompt_lengths = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False)
+    if "t5" in tokenizer.name_or_path:
+        answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
+        prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
+        all_prompt_input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
+    else:
+        input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
+        token_type_ids = prompt_ans_lm_inputs["token_type_ids"].to(device) # token_type_ids = 0 for prompt, 1 for answer
+        # get decoded answers
+        answers = [tokenizer.decode(input_ids[i, token_type_ids[i] == 1], skip_special_tokens=True) for i in range(input_ids.shape[0])]
+        # extract prompt ids and prompt lengths from input_ids
+        all_prompt_input_ids, prompt_lengths = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False)
+        del prompt_ans_lm_inputs
 
     for prompt_input_ids in all_prompt_input_ids:
         if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
             num_too_long += 1
             prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
-    for input_ids_batch, prompt_length_batch in zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size)):
-        with torch.no_grad():
-            output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
-            all_predictions.extend(get_batch_answer_from_model_output(output_batch, tokenizer, prompt_length_batch))
+    if "llama" in tokenizer.name_or_path:
+        # llama generation repeats the prompt, hence special handling
+        for input_ids_batch, prompt_length_batch in zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size)):
+            with torch.no_grad():
+                output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+            generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
+            all_predictions.extend(get_batch_answer_from_model_output(generation_strs, prompt_length_batch))
+    else:
+        for input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
+            with torch.no_grad():
+                output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+            generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
+            all_predictions.extend(generation_strs)
 
     for prediction, answer in zip(all_predictions, answers):
+        # print(f"Prediction: {prediction}")
+        # print(f"Answer: {answer}", "\n")
         is_correct = exact_match(prediction, answer) # now we only have one ans per example
         # is_correct = any([exact_match(prediction, answer) for answer in answers])
         if is_correct:

@@ -1,36 +1,35 @@
 ## data
-train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train/formatted-ms2.nq-train.hits-100.json
-dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev/formatted-ms2.nq-dev.hits-100.json
+train_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train
+dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev
+train_file: formatted-ms2.nq-train.json
+dev_file: formatted-ms2.nq-dev.json
 
 ## training
 doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
 query_encoder: facebook/dpr-question_encoder-single-nq-base
-lm_model: google/flan-t5-large # gpt2 
+lm_model: google/flan-t5-large
+# gpt2, google/flan-t5-large
 model_parallelism: False
-train_index_path: embeddings/dpr/train_50.pt
-dev_index_path: embeddings/dpr/dev_10.pt
-# train_index_path: embeddings/dpr/train_10000.pt # embeddings/contriever/train_10000.pt
-# dev_index_path: embeddings/dpr/dev_1000.pt # embeddings/contriever/dev_1000.pt
+index_dir: embeddings/dpr # embeddings/contriever/train_10000.pt
 data_size: "debug"
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
-empty_doc_embedding_path: embeddings/contriever/empty_doc_embedding.pt
 gold_dev_answers_path: results/nq-dev-answers.json
-max_round: 2
+max_round: 1
 k: 3
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
-llm_batch_size: 10
+per_device_train_batch_size: 10
+per_device_eval_batch_size: 12 # 8 ok
+llm_batch_size: 16
 # debug: set num_worker=0, pin_memory=False
 num_workers: 0
 pin_memory: False
 auth_token: None
-cache_dir: None
+cache_dir: cache
 adam_eps: 1.0e-8
 weight_decay: 0.0
 max_grad_norm: 2.0
 lr: 2.0e-5
 warmup_steps: 1237
-max_train_epochs: 5
+max_train_epochs: 2
 seed: 19980406
 gradient_accumulation_steps: 1
 val_check_interval: 1.0
