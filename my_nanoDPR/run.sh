@@ -2,6 +2,6 @@
 # in cuda8, use gpu_ids 0 for first A6000, 1 for the latter A5000, 好像也不一定@@
     # --multi_gpu \
 accelerate launch \
-    --gpu_ids 1 \
+    --gpu_ids 0 \
     --debug \
     train_dpr.py

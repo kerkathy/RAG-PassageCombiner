@@ -1,10 +1,7 @@
-import json
-import os
 import re
 import string
 import torch
 from torch.nn import CrossEntropyLoss
-from transformers import AutoConfig, AutoTokenizer
 
 def normalize_question(question):
     if not question.endswith("?"):
@@ -31,45 +28,6 @@ def normalize_answer(s):
 def exact_match(prediction, ground_truth):
     # TODO 考慮改寬鬆一點
     return normalize_answer(prediction) == normalize_answer(ground_truth)
-
-def load_lm_tokenizer(model_name):
-    if "llama" in model_name:
-        from transformers import LlamaTokenizer
-        return LlamaTokenizer.from_pretrained(model_name)
-    return AutoTokenizer.from_pretrained(model_name)
-
-def load_lm_model_and_tokenizer(model_name, device, model_parallelism=False, cache_dir=None, auth_token=None):
-    device_count = torch.cuda.device_count()
-    assert 'cuda' in device.type, f"CPU not supported!!!! You are using {device.type} device."
-
-    config = AutoConfig.from_pretrained(model_name)
-    model_args = {}
-    if cache_dir is not None:
-        model_args["cache_dir"] = cache_dir
-    if model_parallelism:
-        model_args["device_map"] = "auto"
-        model_args["low_cpu_mem_usage"] = True
-    if hasattr(config, "torch_dtype") and config.torch_dtype is not None:
-        model_args["torch_dtype"] = config.torch_dtype
-    if auth_token is not None:
-        model_args["use_auth_token"] = auth_token
-
-    if "flan" in model_name:
-        from transformers import AutoModelForSeq2SeqLM
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **model_args).eval()
-    else:
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(model_name, **model_args).eval()
-    if not model_parallelism:
-        model = model.to(device)
-    tokenizer = load_lm_tokenizer(model_name)
-
-    # TODO 感覺會跟 accelerator 有衝突
-    if device_count > 1 and not model_parallelism:
-        model = torch.nn.DataParallel(model)
-
-    return model, tokenizer, config
-
 
 def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False):
     """
@@ -124,7 +82,8 @@ def get_t5_lm_score(
     if input_ids.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
-    print("Num too long: ", num_too_long)
+    if num_too_long > 0:
+        print("Num too long: ", num_too_long)
 
     log_probs = []
     for input_ids_batch, labels_batch \
@@ -139,7 +98,7 @@ def get_t5_lm_score(
             log_probs_batch = -ce_fn(
                 logits_batch.view(-1, logits_batch.shape[-1]), labels_batch.view(-1))
             
-        log_probs.append(log_probs_batch.view(eff_batch_size, -1, seq_len).sum(dim=-1)) # [n_question_batch, n_comb]
+        log_probs.append(log_probs_batch.view(eff_batch_size, -1, seq_len).sum(dim=-1)) # [n_batch_question, n_comb]
         # print("log_probs_batch.shape: ", log_probs[-1].shape)
     log_probs = torch.cat(log_probs, dim=0)
     # print("Concated log_probs.shape: ", log_probs.shape, "\n")
@@ -163,7 +122,8 @@ def get_lm_score(
     if input_ids.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
-    print("Num too long: ", num_too_long)
+    if num_too_long > 0:
+        print("Num too long: ", num_too_long)
 
     all_outputs = []
     for input_ids_batch, attention_mask_batch in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size)):
@@ -207,7 +167,7 @@ def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
     return answers
 
 
-def evaluate_dataset(
+def lm_gen_and_check(
         model, tokenizer, device, max_length, prompt_ans_lm_inputs,
         max_tokens_to_generate=10, train_step_logdir=".", llm_batch_size=1
 ):
@@ -247,23 +207,16 @@ def evaluate_dataset(
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
 
+
     for prediction, answer in zip(all_predictions, answers):
-        # print(f"Prediction: {prediction}")
-        # print(f"Answer: {answer}", "\n")
         is_correct = exact_match(prediction, answer) # now we only have one ans per example
         # is_correct = any([exact_match(prediction, answer) for answer in answers])
         if is_correct:
             num_correct += 1
 
     num_data = len(prompt_lengths)
-    em = num_correct / num_data * 100
+    # em = num_correct / num_data * 100
 
-    d = {"em": em, "num_examples": num_data, "too_long": num_too_long}
+    result = {"num_correct": num_correct, "num_examples": num_data, "too_long": num_too_long, "predictions": all_predictions}
 
-    with open(os.path.join(train_step_logdir, "eval.json"), "w", encoding='utf-8') as f:
-        f.write(json.dumps(d) + "\n")
-    with open(os.path.join(train_step_logdir, "prediction.json"), "w", encoding='utf-8') as f:
-        for item in all_predictions:
-            f.write(item + "\n")
-
-    return d
+    return result
