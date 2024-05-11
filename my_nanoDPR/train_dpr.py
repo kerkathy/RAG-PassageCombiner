@@ -36,11 +36,10 @@ from utils import (
     load_query_encoder_and_tokenizer
 )
 
-debug = True  # set log mode to debug, and stop wandb logging
+debug = False  # set log mode to debug, and stop wandb logging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
-
 
 def parse_args():
     # import argparse
@@ -108,7 +107,7 @@ class QADataset(torch.utils.data.Dataset):
                 prompt, answer = cur_prompt_ans.get()
                 doc_ids = retrieve_top_k_docid(prompt, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k)  # Pass device to function
                 for docid in doc_ids:
-                    next_prompts_ans.put((" ".join([prompt, corpus[docid]]), answer))
+                    next_prompts_ans.put(("\n".join([prompt, corpus[docid]]), answer))
                     data.append((prompt, corpus[docid], answer, doc_embeddings[docid].to(embedding_device)))
         # logger.debug(f"After getitem, data size: {len(data)}")
         return data # List of tuples
@@ -125,8 +124,7 @@ class QADataset(torch.utils.data.Dataset):
         query_inputs = self.ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
         # collect doc_inputs from doc_embeddings
         doc_embeddings = torch.stack([x[3] for x in samples], dim=0)
-        # TODO fix : should be " ".join([x[1], x[0]])...??? or no...
-        prompt = [" ".join([x[1], x[0]]) for x in samples]
+        prompt = ["\n".join([x[1], x[0]]) for x in samples]
         answer = [x[2] for x in samples]
         if "t5" in self.lm_tokenizer.name_or_path:
             # separate input_ids (send into encoder) and labels (send into decoder)
@@ -306,7 +304,6 @@ def main():
     logger.debug("*** IN DEBUG MODE ***")
     logger.info(f"device: {accelerator.device}")
     model_short_name = "flan" if "flan" in args.lm_model else "llama"
-    old_run_id = args.old_query_encoder_path.split("-")[-1]
 
     accelerator.init_trackers(
         project_name="dpr", 
@@ -323,7 +320,7 @@ def main():
             f"query_encoder: {args.query_encoder}", f"doc_encoder: {args.doc_encoder}", 
             f"max_round: {args.max_round}", f"k: {args.k}", 
             f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
-            "doc->question", "train"
+            "doc->question", "train", "sep:/n"
         ]
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
