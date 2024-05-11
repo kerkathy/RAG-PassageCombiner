@@ -29,6 +29,16 @@ def exact_match(prediction, ground_truth):
     # TODO 考慮改寬鬆一點
     return normalize_answer(prediction) == normalize_answer(ground_truth)
 
+def text_has_answer(answers, text) -> bool:
+    if isinstance(answers, str):
+        answers = [answers]
+    text = normalize_answer(text)
+    for single_answer in answers:
+        single_answer = normalize_answer(single_answer)
+        if single_answer in text:
+            return True
+    return False
+
 def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False):
     """
     Consider input_ids and token_type_ids as a batch of prompt-answer pairs.
@@ -52,7 +62,6 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_
         return prompt_input_ids, prompt_lengths, ans_input_ids
 
     return prompt_input_ids, prompt_lengths
-
 
 def get_t5_lm_score(
     input_ids, labels,
@@ -79,9 +88,9 @@ def get_t5_lm_score(
     # print("llm_batch_size: ", llm_batch_size)
 
     num_too_long = 0
-    if input_ids.shape[-1] > max_length - max_tokens_to_generate:
+    if labels.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
-        input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
+        labels = labels[..., -(max_length - max_tokens_to_generate):]
     if num_too_long > 0:
         print("Num too long: ", num_too_long)
 
@@ -207,8 +216,9 @@ def lm_gen_and_check(
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
 
-
     for prediction, answer in zip(all_predictions, answers):
+        # print("Prediction: ", prediction)
+        # print("Answer: ", answer, "\n")
         is_correct = exact_match(prediction, answer) # now we only have one ans per example
         # is_correct = any([exact_match(prediction, answer) for answer in answers])
         if is_correct:
@@ -220,3 +230,44 @@ def lm_gen_and_check(
     result = {"num_correct": num_correct, "num_examples": num_data, "too_long": num_too_long, "predictions": all_predictions}
 
     return result
+
+
+def build_qa_prompt(example, num_docs=1, require_long=False, output_true_false=False):
+    if output_true_false:
+        # for strategyQA, we need to output true/false
+        # don't care about num of doc
+        q = normalize_question(example["question"])
+        docs_text = "\n\n".join([ctx['text'] for ctx in example["ctxs"][:num_docs]])
+        ex_prompt = f"""Given a question and a context, provide a Yes or No answer and explain why. If you are unsure, answer Unknown.
+#
+Context:
+{docs_text}
+
+Question:
+{q}
+
+Answer (Yes/No/Unknown):
+"""
+        
+    elif num_docs == 0:
+        question_text = normalize_question(example["question"])
+        ex_prompt = f"Answer these questions:\nQ: {question_text}\nA:"
+    elif num_docs == 1:
+        q = normalize_question(example["question"])
+        title = example['ctxs'][0]['title']
+        if title == None:
+            title = ""
+        text = example['ctxs'][0]['text']
+        ex_prompt = f"{title}\n\n{text}\n\nBased on this text, answer these questions:\nQ: {q}\nA:"
+    else:
+        q = normalize_question(example["question"])
+        if example["ctxs"][0]["title"] is not None:
+            docs_text = "\n\n".join([f"{ctx['title']}\n\n{ctx['text']}" for ctx in example["ctxs"][:num_docs]])
+        else:
+            docs_text = "\n\n".join([f"Document {i}: {ctx['text']}" for i, ctx in enumerate(example["ctxs"][:num_docs])])
+        if require_long:
+            ex_prompt = f"{docs_text}\n\nBased on these texts, answer these questions in full sentence, as completely as possible:\nQ: {q}\nA:"
+        else:
+            ex_prompt = f"{docs_text}\n\nBased on these texts, answer these questions:\nQ: {q}\nA:"
+
+    return ex_prompt

@@ -8,18 +8,18 @@ dataset_name: nq
 ## training
 doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
 query_encoder: facebook/dpr-question_encoder-single-nq-base
-lm_model: google/flan-t5-large
+lm_model: huggyllama/llama-7b
 # gpt2, google/flan-t5-large, huggyllama/llama-7b
 model_parallelism: False
 index_dir: embeddings/dpr # embeddings/contriever
 data_size: "1/10"
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
 gold_dev_answers_path: results/nq-dev-answers.json
-max_round: 1
+max_round: 2
 k: 3
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 16
-llm_batch_size: 16
+per_device_train_batch_size: 5
+per_device_eval_batch_size: 5
+llm_batch_size: 5
 max_train_epochs: 1
 num_exemplars: 3
 # debug: set num_worker=0, pin_memory=False

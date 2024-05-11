@@ -4,4 +4,4 @@
 accelerate launch \
     --gpu_ids 0 \
     --debug \
-    train_dpr.py
+    only_eval.py

@@ -1,27 +1,21 @@
 ## data
-train_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train
 dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev
-train_file: formatted-ms2.nq-train.json
 dev_file: formatted-ms2.nq-dev.json
-dataset_name: nq
 
 ## training
 doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
 query_encoder: facebook/dpr-question_encoder-single-nq-base
-lm_model: google/flan-t5-large
+lm_model: gpt2
 # gpt2, google/flan-t5-large, huggyllama/llama-7b
 model_parallelism: False
-index_dir: embeddings/dpr # embeddings/contriever
-data_size: "1/10"
+index_dir: embeddings/dpr # embeddings/contriever/train_10000.pt
+data_size: "debug"
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
 gold_dev_answers_path: results/nq-dev-answers.json
-max_round: 1
+max_round: 2
 k: 3
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 16
-llm_batch_size: 16
-max_train_epochs: 1
-num_exemplars: 3
+per_device_eval_batch_size: 2 # 8 ok
+llm_batch_size: 10
 # debug: set num_worker=0, pin_memory=False
 num_workers: 0
 pin_memory: False
@@ -32,8 +26,21 @@ weight_decay: 0.0
 max_grad_norm: 2.0
 lr: 2.0e-5
 warmup_steps: 1237
+max_train_epochs: 5
 seed: 19980406
 gradient_accumulation_steps: 1
 val_check_interval: 1.0
 max_tokens: 10
 temperature: 0.1
+# old_query_encoder_path: wandb/run-20240510_020643-s817q8kg
+# eval_steps: 2000
+# max_eval_steps: 10000
+old_query_encoder_path: wandb/run-20240510_021133-xpwtaz9g
+eval_steps: 2500
+max_eval_steps: 12500
+# old_query_encoder_path: wandb/run-20240510_014412-ggch6mbr
+# eval_steps: 1000
+# max_eval_steps: 5000
+# 下面是要新增的
+num_exemplars: 3
+dataset_name: nq
