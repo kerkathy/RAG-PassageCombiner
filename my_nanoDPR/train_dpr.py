@@ -38,27 +38,28 @@ from utils import (
     text_has_answer,
 )
 
-debug = False  # set log mode to debug, and stop wandb logging
+debug = True  # set log mode to debug, and stop wandb logging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
 
 def parse_args():
-    # import argparse
-    # parser = argparse.ArgumentParser()
-    # ## adding args here for more control from CLI is possible
-    # parser.add_argument("--config_file",default='config/train_dpr_nq.yaml')
-    # args = parser.parse_args()
-
     # config_file = 'config/train_dpr_nq.yaml'
-    config_file = 'config/llama_train_dpr_nq.yaml'
-    yaml_config = get_yaml_file(config_file)
-    # yaml_config = get_yaml_file(args.config_file)
-    # args_dict = {k:v for k,v in vars(args).items() if v is not None}
-    args_dict = {}
-    args_dict['config_file'] = config_file
+    # config_file = 'config/llama_train_dpr_nq.yaml'
+    # yaml_config = get_yaml_file(config_file)
+    # args_dict = {}
+    # args_dict['config_file'] = config_file
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    ## adding args here for more control from CLI is possible
+    parser.add_argument("--config_file",default='config/train_dpr_nq.yaml')
+    args = parser.parse_args()
+
+    yaml_config = get_yaml_file(args.config_file)
+    args_dict = {k:v for k,v in vars(args).items() if v is not None}
     yaml_config.update(args_dict)
-    args = types.SimpleNamespace(**yaml_config)
+    args = types.SimpleNamespace(**yaml_config) # access in attribute style
     return args
 
 def calculate_dpr_loss(matching_score,labels):
@@ -100,8 +101,6 @@ class QADataset(torch.utils.data.Dataset):
         data = [self.qa_pairs[idx]]  # each item is (query, all_doc, answer, last_doc_embedding)
         corpus = self.all_corpus[idx]
         doc_embeddings = self.all_doc_embeddings[idx]  # Move to correct device
-        cur_pointer = 0
-        next_pointer = len(data)
         embedding_device = data[0][3].device
         # Initialize pointers
         cur_visited = 0
@@ -151,13 +150,18 @@ class QADataset(torch.utils.data.Dataset):
         # collect doc_inputs from doc_embeddings
         doc_embeddings = torch.stack([x[3] for x in samples], dim=0)
         
-        # TODO fix
+        # in each item, num_docs shuold be num items where x[1][i] != "" (empty doc holder)
         prompt = [make_prompt(
-            question=x[0], documents=x[1], lm_name=self.lm_name, num_docs=len(x[1]), 
+            question=x[0], documents=x[1], lm_name=self.lm_name, 
+            num_docs=len([doc for doc in x[1] if doc != ""]),
             num_exemplars=self.args.num_exemplars, dataset=self.args.dataset_name) for x in samples]
         answer = [x[2] for x in samples]
-        has_answer = [text_has_answer(a, p) for a, p in zip(answer, prompt)]
-        num_has_answer = sum(has_answer)
+        num_has_answer = 0
+        for a, p in zip(answer, prompt):
+            logger.debug(f"Answer: {a}")
+            logger.debug(f"Prompt: {p}")
+            if text_has_answer(a, p):
+                num_has_answer += 1
 
         # # debug: max prompt words and print that prompt
         # max_prompt_len = max([len(x.split()) for x in prompt])
@@ -259,7 +263,7 @@ def validate(
                     device=accelerator.device,
                     tokenizer=lm_tokenizer,
                     max_length=model_max_length,
-                    max_tokens_to_generate=args.max_tokens,
+                    max_tokens_to_generate=args.max_tokens_to_generate,
                     num_orig_question=num_orig_question,
                     llm_batch_size=args.llm_batch_size,
                 )
@@ -269,7 +273,7 @@ def validate(
                     model=language_model,
                     device=accelerator.device,
                     max_length=model_max_length,
-                    max_tokens_to_generate=args.max_tokens,
+                    max_tokens_to_generate=args.max_tokens_to_generate,
                     num_orig_question=num_orig_question,
                     llm_batch_size=args.llm_batch_size,
                 )
@@ -308,7 +312,7 @@ def validate(
                 device=accelerator.device,
                 max_length=model_max_length,
                 prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
-                max_tokens_to_generate=args.max_tokens,
+                max_tokens_to_generate=args.max_tokens_to_generate,
                 train_step_logdir=train_step_logdir,
                 llm_batch_size=args.llm_batch_size,
             )
@@ -598,7 +602,7 @@ def main():
                             device=accelerator.device,
                             tokenizer=lm_tokenizer,
                             max_length=model_max_length,
-                            max_tokens_to_generate=args.max_tokens,
+                            max_tokens_to_generate=args.max_tokens_to_generate,
                             num_orig_question=num_orig_question,
                             llm_batch_size=args.llm_batch_size,
                         )
@@ -608,7 +612,7 @@ def main():
                             model=language_model,
                             device=accelerator.device,
                             max_length=model_max_length,
-                            max_tokens_to_generate=args.max_tokens,
+                            max_tokens_to_generate=args.max_tokens_to_generate,
                             num_orig_question=num_orig_question,
                             llm_batch_size=args.llm_batch_size,
                         )

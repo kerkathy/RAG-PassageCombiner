@@ -32,6 +32,7 @@ llama_prompt_with_doc = """[INST] <<SYS>>
 Answer the Question below considering the Document provided.
 Your answer can only be an entity name or a short phrase.
 
+Examples:
 {exemplars}
 
 Document: {documents}
@@ -43,12 +44,17 @@ Answer: [/INST]
 
 flan_prompt_no_doc = """Give an answer to the answerable question.
 {exemplars}
-Question: {question}\n\nAnswer:"
+
+Question: {question}
+Answer:"
 """
 
 flan_prompt_with_doc = """Give an answer to the question.
 {exemplars}
-Context: {documents}\n\nQuestion: {question}\n\nAnswer:"
+
+Context: {documents}
+Question: {question}
+Answer:"
 """
 
 prompt_collection = {
@@ -79,11 +85,11 @@ def make_prompt(question, documents, lm_name, num_docs, num_exemplars, dataset):
     
     if documents == None:
         return prompt_collection[lm_name]["no_doc"].format(
-            exemplars="\n".join(exemplars), question=question
+            exemplars="\n\n".join(exemplars), question=question
         )
     else:
         return prompt_collection[lm_name]["with_doc"].format(
-            exemplars="\n".join(exemplars), question=question, 
+            exemplars="\n\n".join(exemplars), question=question, 
             documents="\n".join(documents)
         )
 
