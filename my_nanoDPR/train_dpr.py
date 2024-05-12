@@ -108,7 +108,9 @@ class QADataset(torch.utils.data.Dataset):
 # def inloop_getitem
 def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args):
     global logger
+    # logger.debug("In inloop_getitem...")
     embedding_device = data[0][3].device
+
     # Initialize pointers
     cur_visited = 0
     this_round_should_visited = 0
@@ -127,6 +129,7 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
             cur_visited += 1
 
             # Retrieve top k documents
+            # logger.debug(f"query: {doc_list[-1] + ' ' + query}")
             doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
             # Append new data
             for docid in doc_ids:
@@ -135,7 +138,7 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
 
                 # Increment next_pointer
                 next_round_should_visited += 1
-    logger.debug(f"After getitem, data size: {len(data)}")
+    # logger.debug(f"After getitem, data size: {len(data)}")
     return data  # List of tuples
 
 
@@ -191,7 +194,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
 
     return {
         "query_inputs": query_inputs, # dict
-        "doc_embeddings": doc_embeddings, # tensor
+        "doc_embeddings": doc_embeddings, # tensor, [bs,n_dim]
         "prompt_ans_lm_inputs": prompt_ans_lm_inputs, # dict
         "num_has_answer": num_has_answer, # int
     }
@@ -200,7 +203,7 @@ def validate(
         query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
         accelerator, model_max_length, train_step_logdir
 ):
-    logger.info("*** Start validation ***")
+    logger.info(f"*** Start validation at {train_step_logdir.split('/')[-1]} ***")
     query_encoder.eval()
     language_model.eval()
     total_loss = 0
@@ -212,6 +215,7 @@ def validate(
     total_num_examples = 0
     total_too_long = 0
     total_has_answer = 0
+    total_num_correct_pick = 0
 
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
         # make raw_batch into a extened batch
@@ -239,8 +243,8 @@ def validate(
             logger.debug(f"query_encoder device: {next(query_encoder.parameters()).device}")
             query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
                 if "dpr" in args.query_encoder \
-                else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
-            doc_embedding = batch["doc_embeddings"]
+                else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:] # [bs,n_dim]
+            doc_embedding = batch["doc_embeddings"] # 
             
             # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
@@ -294,10 +298,11 @@ def validate(
                     llm_batch_size=args.llm_batch_size,
                 )
             
+            # TODO add a analysis of the retriever_score and lm_score
+            
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             logger.debug(f"...Calculating loss...: {torch.cuda.memory_allocated() / 1e6} MB")
             loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
-            total_loss += loss.item()
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
@@ -305,23 +310,28 @@ def validate(
             # get its corresponding lm_score
             # note. retriever_score and lm_score are both [n_question,n_comb]
             retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
+            total_num_correct_pick += (retrievers_pick == torch.argmax(lm_score,dim=1)).sum().item()
             lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
-            # TODO weird... 又好像沒問題...
-            total_ans_prob += lm_score.exp().mean().item()
+            total_ans_prob += lm_score.exp().sum().item() 
+            # count how many retriever's pick is the same as lm's pick
             all_retriever_pick.extend(retrievers_pick.tolist())
             retriever_score, lm_score = retriever_score.to("cpu"), lm_score.to("cpu")
             del retriever_score, lm_score
             torch.cuda.empty_cache()
 
-            ## Metric 3. Exact match
-            # reshape from [n_question*n_comb,seq_len] to [n_question,n_comb,seq_len]
-            batch['prompt_ans_lm_inputs'] = {
-                k: v.view(num_orig_question, -1, v.shape[-1]) for k,v in batch['prompt_ans_lm_inputs'].items()
-            }
-            # and then take the retriever's pick for each question
-            batch['prompt_ans_lm_inputs'] = {
-                k: v[torch.arange(num_orig_question),retrievers_pick] for k,v in batch['prompt_ans_lm_inputs'].items()
-            }
+            # ## Metric 3. Exact match
+            # # reshape from [n_question*n_comb,seq_len] to [n_question,n_comb,seq_len]
+            # batch['prompt_ans_lm_inputs'] = {
+            #     k: v.view(num_orig_question, -1, v.shape[-1]) for k,v in batch['prompt_ans_lm_inputs'].items()
+            # }
+            # # and then take the retriever's pick for each question
+            # batch['prompt_ans_lm_inputs'] = {
+            #     k: v[torch.arange(num_orig_question),retrievers_pick] for k,v in batch['prompt_ans_lm_inputs'].items()
+            # }
+            # refactor into for loop
+            for k,v in batch['prompt_ans_lm_inputs'].items():
+                v = v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick]
+
             batch_result = lm_gen_and_check(
                 model=language_model, 
                 tokenizer=lm_tokenizer,
@@ -336,6 +346,7 @@ def validate(
             total_num_examples += batch_result["num_examples"]
             total_too_long += batch_result["too_long"]
             all_predictions.extend(batch_result["predictions"])
+            total_loss += loss.item() * batch_result["num_examples"]
 
             num_batches += 1
             total_has_answer += batch["num_has_answer"]
@@ -348,12 +359,15 @@ def validate(
         for item in all_predictions:
             f.write(item + "\n")
 
-    avg_loss = total_loss / num_batches
-    avg_prob = total_ans_prob / num_batches
-    exact_match = total_num_correct / total_num_examples * 100
-    final_result = {"loss": avg_loss, "avg_prob": avg_prob, "exact_match": exact_match, \
-            "too_long": total_too_long, "has_answer": total_has_answer}
-    logger.info(f"Done validation.")
+    final_result = {
+        "avg_loss": total_loss / total_num_examples, 
+        "avg_prob": total_ans_prob / total_num_examples, # 這裡原本算錯啦! 原本是每個 batch 的 mean 加起來再除以 num_batches
+        "exact_match (%)": total_num_correct / total_num_examples * 100,
+        "too_long (%)": total_too_long / total_num_examples * 100,
+        "has_answer (%)": total_has_answer / total_num_examples * 100,
+        "retriever_pick_acc (%)": total_num_correct_pick / total_num_examples * 100,
+    }
+    logger.info(f"Done {train_step_logdir.split('/')[-1]} step validation.")
     for k,v in final_result.items():
         logger.info(f"{k}: {v}")
     return final_result
@@ -428,10 +442,9 @@ def main():
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
 
     logger.info("...Loading data...")
-    # skip those exemplars
+    # skip data used as exemplars
     train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))[args.num_exemplars:]
     dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
-
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
 
@@ -709,7 +722,7 @@ def main():
                 
                 optimizer.step()
                 optimizer.zero_grad()
-                logger.debug(f"Finish step {step}.\n GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                logger.debug(f"Finish step {step} in epoch {epoch}.\n GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
     if accelerator.is_local_main_process:
         logger.info(f"Time spent: {time.time() - start_time} seconds")

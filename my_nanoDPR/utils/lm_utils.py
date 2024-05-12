@@ -98,19 +98,19 @@ def get_t5_lm_score(
 
     log_probs = []
     for input_ids_batch, labels_batch \
-    in zip(input_ids.split(llm_batch_size), labels.split(llm_batch_size)):
+        in zip(input_ids.split(llm_batch_size), labels.split(llm_batch_size)):
+
         input_ids_batch = input_ids_batch.to(device)
         labels_batch = labels_batch.to(device)
         with torch.no_grad():
             logits_batch = model(input_ids=input_ids_batch, labels=labels_batch).logits
-            eff_batch_size, seq_len = logits_batch.shape[:2]
+            eff_batch_size, seq_len, vocab_size = logits_batch.shape
             ce_fn = CrossEntropyLoss(
                 reduction="none", ignore_index=tokenizer.pad_token_id)
-            log_probs_batch = -ce_fn(
-                logits_batch.view(-1, logits_batch.shape[-1]), labels_batch.view(-1))
+            log_probs_batch = -ce_fn(logits_batch.view(-1, vocab_size), labels_batch.view(-1)) # [eff_batch_size * seq_len]
             
-        log_probs.append(log_probs_batch.view(eff_batch_size, -1, seq_len).sum(dim=-1)) # [n_batch_question, n_comb]
-        # print("log_probs_batch.shape: ", log_probs[-1].shape)
+        log_probs.append(log_probs_batch.view(eff_batch_size, seq_len).sum(dim=-1)) # [eff_batch_size]
+        # print("T5 log_probs_batch.shape: ", log_probs[-1].shape)
     log_probs = torch.cat(log_probs, dim=0)
     # print("Concated log_probs.shape: ", log_probs.shape, "\n")
     # print("log_probs: ", log_probs)
@@ -137,7 +137,9 @@ def get_lm_score(
         print("Num too long: ", num_too_long)
 
     all_outputs = []
-    for input_ids_batch, attention_mask_batch in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size)):
+    for input_ids_batch, attention_mask_batch \
+        in zip(input_ids.split(llm_batch_size), attention_mask.split(llm_batch_size)):
+
         input_ids_batch = input_ids_batch.to(device)
         attention_mask_batch = attention_mask_batch.to(device)
 
