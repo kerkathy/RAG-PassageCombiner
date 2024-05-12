@@ -62,8 +62,8 @@ def parse_args():
     args = types.SimpleNamespace(**yaml_config) # access in attribute style
     return args
 
-def calculate_dpr_loss(matching_score,labels):
-    return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
+# def calculate_dpr_loss(matching_score,labels):
+#     return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
 
 def calculate_KL_div_loss(
     input_logits, # [n_question,n_comb]
@@ -74,131 +74,130 @@ def calculate_KL_div_loss(
     Calculate KL divergence loss between input and target logits
     Note: input_logits and target_logits are logits, not distributions
     """
+    global logger
+    logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
+    logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     loss = kl_loss(
-        F.log_softmax(input_logits / temperature, dim=1),
+        F.log_softmax(input_logits / temperature, dim=1), # input should be a distribution in the log space
         F.softmax(target_logits / temperature, dim=1),
     )
     return loss
 
 class QADataset(torch.utils.data.Dataset):
-    def __init__(self, qa_pairs, all_corpus, all_doc_embeddings, ret_tokenizer, lm_tokenizer, query_encoder, stage, args, accelerator):
+    def __init__(self, qa_pairs, all_corpus, all_doc_embeddings):
         self.qa_pairs = qa_pairs
         self.all_corpus = all_corpus
         self.all_doc_embeddings = all_doc_embeddings
-        self.ret_tokenizer = ret_tokenizer
-        self.lm_tokenizer = lm_tokenizer
-        self.lm_name = lm_tokenizer.name_or_path
-        self.query_encoder = query_encoder
-        self.stage = stage
-        self.args = args
-        self.accelerator = accelerator
-
+        
     def __len__(self):
         return len(self.qa_pairs)
-    
+
     def __getitem__(self, idx):
         data = [self.qa_pairs[idx]]  # each item is (query, all_doc, answer, last_doc_embedding)
         corpus = self.all_corpus[idx]
         doc_embeddings = self.all_doc_embeddings[idx]  # Move to correct device
-        embedding_device = data[0][3].device
-        # Initialize pointers
-        cur_visited = 0
-        this_round_should_visited = 0
-        next_round_should_visited = len(data)
-
-        # Loop over rounds
-        for i_rnd in range(self.args.max_round):
-            logger.debug(f"Round {i_rnd} has {next_round_should_visited} data to go thru...")
-            # Update pointers
-            this_round_should_visited = next_round_should_visited
-            next_round_should_visited = 0
-            cur_visited = 0
-            # Process data from current round
-            while cur_visited < this_round_should_visited:
-                # Get current data
-                query, doc_list, answer, _ = data[cur_visited]
-                cur_visited += 1
-
-                # Retrieve top k documents
-                doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, self.ret_tokenizer, self.query_encoder, self.args.k)
-                # Append new data
-                for docid in doc_ids:
-                    new_doc_list = doc_list + [corpus[docid]]
-                    data.append((query, new_doc_list, answer, doc_embeddings[docid].to(embedding_device)))
-
-                    # Increment next_pointer
-                    next_round_should_visited += 1
-        logger.debug(f"After getitem, data size: {len(data)}")
-        # for i in range(len(data)):
-        #     logger.debug(f"Data {i}: {data[i][:-1]}")
-        return data  # List of tuples
-
-
+        return {"data": data, "corpus": corpus, "doc_embeddings": doc_embeddings}
+    
     def collate_fn(self, samples):
         """
-        samples: List[List[tuple]]
+        samples: List[Dict]
         """
-        # TODO add feature: 不同文章數量的分開 decode
-        # flatten the samples into a list of tuples
-        # logger.debug(f"Original batch size: {len(samples)}")
-        samples = [item for sublist in samples for item in sublist]
-        logger.debug(f"Real batch size: {len(samples)}")
-        
-        # each item is (query, all_doc, answer, last_doc_embedding)
-        query_inputs = self.ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
-        # collect doc_inputs from doc_embeddings
-        doc_embeddings = torch.stack([x[3] for x in samples], dim=0)
-        
-        # in each item, num_docs shuold be num items where x[1][i] != "" (empty doc holder)
-        prompt = [make_prompt(
-            question=x[0], documents=x[1], lm_name=self.lm_name, 
-            num_docs=len([doc for doc in x[1] if doc != ""]),
-            num_exemplars=self.args.num_exemplars, dataset=self.args.dataset_name) for x in samples]
-        answer = [x[2] for x in samples]
-        num_has_answer = 0
-        for a, p in zip(answer, prompt):
-            logger.debug(f"Answer: {a}")
-            logger.debug(f"Prompt: {p}")
-            if text_has_answer(a, p):
-                num_has_answer += 1
+        return samples
+    
+# def inloop_getitem
+def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args):
+    global logger
+    embedding_device = data[0][3].device
+    # Initialize pointers
+    cur_visited = 0
+    this_round_should_visited = 0
+    next_round_should_visited = len(data)
 
-        # # debug: max prompt words and print that prompt
-        # max_prompt_len = max([len(x.split()) for x in prompt])
-        # max_prompt_idx = [i for i, x in enumerate(prompt) if len(x.split()) == max_prompt_len]
-        # logger.debug(f"Max prompt len: {max_prompt_len}")
-        # logger.debug(f"Max prompt: {prompt[max_prompt_idx[0]]}")
+    for i_rnd in range(args.max_round):
+        # logger.debug(f"Round {i_rnd} has {next_round_should_visited} data to go thru...")
+        # Update pointers
+        this_round_should_visited = next_round_should_visited
+        next_round_should_visited = 0
+        cur_visited = 0
+        # Process data from current round
+        while cur_visited < this_round_should_visited:
+            # Get current data
+            query, doc_list, answer, _ = data[cur_visited]
+            cur_visited += 1
 
-        if "t5" in self.lm_name:
-            # separate input_ids (send into encoder) and labels (send into decoder)
-            # regarding max_length: https://huggingface.co/google/flan-t5-xxl/discussions/41
-            # regarding max_length: https://github.com/google-research/FLAN/issues/36
-            input_ids = self.lm_tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048).input_ids
-            labels = self.lm_tokenizer(answer, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids
-            prompt_ans_lm_inputs = {"input_ids": input_ids, "labels": labels}
+            # Retrieve top k documents
+            doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
+            # Append new data
+            for docid in doc_ids:
+                new_doc_list = doc_list + [corpus[docid]]
+                data.append((query, new_doc_list, answer, doc_embeddings[docid].to(embedding_device)))
+
+                # Increment next_pointer
+                next_round_should_visited += 1
+    logger.debug(f"After getitem, data size: {len(data)}")
+    return data  # List of tuples
+
+
+def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
+    """
+    samples: List[List[tuple]]
+    """
+    global logger
+    # TODO add feature: 不同文章數量的分開 decode
+    # flatten the samples into a list of tuples
+    # logger.debug(f"Original batch size: {len(samples)}")
+    samples = [item for sublist in samples for item in sublist]
+    logger.debug(f"Real batch size: {len(samples)}")
+    
+    # each item is (query, all_doc, answer, last_doc_embedding)
+    query_inputs = ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
+    # collect doc_inputs from doc_embeddings
+    doc_embeddings = torch.stack([x[3] for x in samples], dim=0)
+    
+    # in each item, num_docs shuold be num items where x[1][i] != "" (empty doc holder)
+    prompt = [make_prompt(
+        question=x[0], documents=x[1], lm_name=lm_name, 
+        num_docs=len([doc for doc in x[1] if doc != ""]),
+        num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
+    answer = [x[2] for x in samples]
+    num_has_answer = 0
+    for a, p in zip(answer, prompt):
+        # logger.debug(f"Answer: {a}")
+        # logger.debug(f"Prompt: {p}")
+        if text_has_answer(a, p):
+            num_has_answer += 1
+
+    if "t5" in lm_name:
+        # separate input_ids (send into encoder) and labels (send into decoder)
+        # regarding max_length: https://huggingface.co/google/flan-t5-xxl/discussions/41
+        # regarding max_length: https://github.com/google-research/FLAN/issues/36
+        input_ids = lm_tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048).input_ids
+        labels = lm_tokenizer(answer, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids
+        prompt_ans_lm_inputs = {"input_ids": input_ids, "labels": labels}
+    else:
+        if "Llama-2" in lm_name:
+            max_length = 4096
+        elif "llama-" in lm_name: # llama 1
+            max_length = 2048
+        elif "gpt2" in lm_name:
+            max_length = 1024
         else:
-            if "Llama-2" in self.lm_name:
-                max_length = 4096
-            elif "llama-" in self.lm_name: # llama 1
-                max_length = 2048
-            elif "gpt2" in self.lm_name:
-                max_length = 1024
-            else:
-                max_length = 256
-            prompt_ans_lm_inputs = self.lm_tokenizer(
-                prompt, answer, max_length=max_length, padding=True, truncation=True, 
-                return_tensors='pt', return_token_type_ids=True
-            )
+            max_length = 256
+        prompt_ans_lm_inputs = lm_tokenizer(
+            prompt, answer, max_length=max_length, padding=True, truncation=True, 
+            return_tensors='pt', return_token_type_ids=True
+        )
 
-        return {
-            "query_inputs": query_inputs,
-            "doc_embeddings": doc_embeddings,
-            "prompt_ans_lm_inputs": prompt_ans_lm_inputs,
-            "num_has_answer": num_has_answer,
-        }
+    return {
+        "query_inputs": query_inputs, # dict
+        "doc_embeddings": doc_embeddings, # tensor
+        "prompt_ans_lm_inputs": prompt_ans_lm_inputs, # dict
+        "num_has_answer": num_has_answer, # int
+    }
     
 def validate(
-        query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
+        query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
         accelerator, model_max_length, train_step_logdir
 ):
     logger.info("*** Start validation ***")
@@ -214,7 +213,24 @@ def validate(
     total_too_long = 0
     total_has_answer = 0
 
-    for step, batch in tqdm(enumerate(dev_dataloader)):
+    for step, raw_batch in tqdm(enumerate(dev_dataloader)):
+        # make raw_batch into a extened batch
+        # by first extend each item and then collate_fn
+        with torch.no_grad():
+            extended_batch = [inloop_extend_item(
+                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
+                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+            ) for x in raw_batch]
+        batch = inloop_collate_fn(
+            samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
+            lm_name=args.lm_model, args=args
+        )
+        del extended_batch, raw_batch
+        
+        batch["doc_embeddings"] = batch["doc_embeddings"].to(accelerator.device)
+        batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
+        batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
+        
         with torch.no_grad():
             ## Metric 1. Loss
             logger.debug("...Sending batch to model...")
@@ -337,6 +353,7 @@ def validate(
     exact_match = total_num_correct / total_num_examples * 100
     final_result = {"loss": avg_loss, "avg_prob": avg_prob, "exact_match": exact_match, \
             "too_long": total_too_long, "has_answer": total_has_answer}
+    logger.info(f"Done validation.")
     for k,v in final_result.items():
         logger.info(f"{k}: {v}")
     return final_result
@@ -485,8 +502,8 @@ def main():
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-    train_dataset = QADataset(train_qa_pairs, train_corpus, train_doc_embeddings, query_tokenizer, lm_tokenizer, query_encoder, 'train', args, accelerator)
-    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, dev_doc_embeddings, query_tokenizer, lm_tokenizer, query_encoder, 'dev', args, accelerator)
+    train_dataset = QADataset(train_qa_pairs, train_corpus, train_doc_embeddings)
+    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, dev_doc_embeddings)
     
     logger.info("...Deleting train_data and dev_data...")
     del train_data, dev_data
@@ -527,7 +544,7 @@ def main():
     steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
     if not os.path.exists(steps_log_dir):
         os.makedirs(steps_log_dir)
-    loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
     accelerator.log({"eval":loss}, step=completed_steps)
 
     logger.info("\n***** Running training *****")
@@ -552,8 +569,27 @@ def main():
         set_seed(args.seed+epoch)
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
         logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-        for step,batch in enumerate(train_dataloader):
+        for step,raw_batch in enumerate(train_dataloader):
+            # TODO go to modify evaluate function after this finish
             logger.debug(f"... Successfully load batches in epoch {epoch} ...")
+            
+            # make raw_batch into a extened batch
+            # by first extend each item and then collate_fn
+            with torch.no_grad():
+                extended_batch = [inloop_extend_item(
+                    data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
+                    ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+                ) for x in raw_batch]
+            batch = inloop_collate_fn(
+                samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
+                lm_name=args.lm_model, args=args
+            )
+            del extended_batch, raw_batch
+            
+            batch["doc_embeddings"] = batch["doc_embeddings"].to(accelerator.device)
+            batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
+            batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
+        
             query_encoder.train()
             with accelerator.accumulate(query_encoder): # gradient accumulation
                 with accelerator.autocast():
@@ -620,7 +656,7 @@ def main():
                     # move retriever_score back to GPU
                     retriever_score = retriever_score.to(accelerator.device)
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-                    logger.debug(f"retriever_score.device: {retriever_score.device}; lm_score.device: {lm_score.device}")
+                    # logger.debug(f"retriever_score.device: {retriever_score.device}; lm_score.device: {lm_score.device}")
 
                     # # try to fix RuntimeError: Found dtype Float but expected Half
                     # for param in query_encoder.parameters():
@@ -658,7 +694,7 @@ def main():
                         steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
                         if not os.path.exists(steps_log_dir):
                             os.makedirs(steps_log_dir)
-                        loss = validate(query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+                        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
                         query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
