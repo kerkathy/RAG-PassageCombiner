@@ -88,9 +88,11 @@ def get_t5_lm_score(
     # print("llm_batch_size: ", llm_batch_size)
 
     num_too_long = 0
+    # print(f"Max accepted length: {max_length} - {max_tokens_to_generate} = {max_length - max_tokens_to_generate}")
     if labels.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
         labels = labels[..., -(max_length - max_tokens_to_generate):]
+        print("labels.shape: ", labels.shape)
     if num_too_long > 0:
         print("Num too long: ", num_too_long)
 
@@ -185,6 +187,7 @@ def lm_gen_and_check(
     all_predictions = []
 
     if "t5" in tokenizer.name_or_path:
+        # t5 generation has no constraint on the length
         answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
         prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
         all_prompt_input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
@@ -196,11 +199,11 @@ def lm_gen_and_check(
         # extract prompt ids and prompt lengths from input_ids
         all_prompt_input_ids, prompt_lengths = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False)
         del prompt_ans_lm_inputs
-
-    for prompt_input_ids in all_prompt_input_ids:
-        if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
-            num_too_long += 1
-            prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
+        # constraint the length of the prompt
+        for prompt_input_ids in all_prompt_input_ids:
+            if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
+                num_too_long += 1
+                prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
     if "llama" in tokenizer.name_or_path:
         # llama generation repeats the prompt, hence special handling
