@@ -29,8 +29,8 @@ from utils import (
     make_index,
     retrieve_top_k_docid,
     load_lm_model_and_tokenizer,
-    get_lm_score,
-    get_t5_lm_score,
+    get_lm_prob,
+    get_t5_lm_prob,
     lm_gen_and_check,
     load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
@@ -38,7 +38,7 @@ from utils import (
     text_has_answer,
 )
 
-debug = False  # set log mode to debug, and stop wandb logging
+debug = True  # set log mode to debug, and stop wandb logging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -76,12 +76,12 @@ def calculate_KL_div_loss(
     """
     global logger
     logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    logger.debug(f"target_logits: {F.softmax(target_logits / temperature / temperature, dim=1)}")
+    logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     loss = kl_loss(
         F.log_softmax(input_logits / temperature, dim=1), # input should be a distribution in the log space
         # F.softmax(target_logits / temperature, dim=1),
-        F.softmax(target_logits / temperature / temperature, dim=1),
+        F.softmax(target_logits / temperature, dim=1),
     )
     return loss
 
@@ -217,6 +217,7 @@ def validate(
     total_too_long = 0
     total_has_answer = 0
     total_num_correct_pick = 0
+    total_retrievers_pick_lm_prob = 0
 
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
         # make raw_batch into a extened batch
@@ -266,9 +267,12 @@ def validate(
                 query_embedding = torch.cat(query_list, dim=0)
 
             logger.debug("...Calculating loss from DPR...")
-            retriever_score = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
+            # convert query_embedding and doc_embedding to unit vectors
+            query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
+            doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
+            retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
             num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
-            retriever_score = retriever_score.reshape(num_orig_question, -1)
+            retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
@@ -278,7 +282,7 @@ def validate(
 
             logger.debug("...Calculating loss from LM...")
             if "flan" in args.lm_model:
-                lm_score = get_t5_lm_score(
+                lm_prob = get_t5_lm_prob(
                     **batch['prompt_ans_lm_inputs'],
                     model=language_model,
                     device=accelerator.device,
@@ -289,7 +293,7 @@ def validate(
                     llm_batch_size=args.llm_batch_size,
                 )
             else:
-                lm_score = get_lm_score(
+                lm_prob = get_lm_prob(
                     **batch['prompt_ans_lm_inputs'],
                     model=language_model,
                     device=accelerator.device,
@@ -299,49 +303,40 @@ def validate(
                     llm_batch_size=args.llm_batch_size,
                 )
             
-            # TODO add a analysis of the retriever_score and lm_score
+            # TODO add a analysis of the retriever_cossim and lm_prob
             
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             logger.debug(f"...Calculating loss...: {torch.cuda.memory_allocated() / 1e6} MB")
-            loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
+            loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
             logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
-            # for each question, take idx of max retriever_score 
-            # get its corresponding lm_score
-            # note. retriever_score and lm_score are both [n_question,n_comb]
-            retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
+            # for each question, take idx of max retriever_cossim 
+            # get its corresponding lm_prob
+            # note. retriever_cossim and lm_prob are both [n_question,n_comb]
+            retrievers_pick = torch.argmax(retriever_cossim,dim=1) # [n_question]
 
-            ### debug
-            print(f"retriever_score: {retriever_score}")
-            print(f"softmax retriever score: {F.softmax(retriever_score / temperature,dim=1)}")
-            print(f"lm_score: {lm_score}")
-            print(f"softmax lm score: {F.softmax(lm_score / temperature / temperature, dim=1)}")
-            print(f"retrievers_pick: {retrievers_pick}")
-            print(f"lm score each question max: {lm_score[torch.arange(num_orig_question),torch.argmax(lm_score,dim=1)]}")
-            print(f"retrievers pick lm score: {lm_score[torch.arange(num_orig_question),retrievers_pick]}")
-            ### debug
+            # ### debug
+            # print(f"retriever_cossim: {retriever_cossim}")
+            # print(f"softmax retriever score: {F.softmax(retriever_cossim / temperature,dim=1)}")
+            # print(f"lm_prob: {lm_prob}")
+            # print(f"softmax lm score: {F.softmax(lm_prob / temperature / temperature, dim=1)}")
+            # print(f"retrievers_pick: {retrievers_pick}")
+            # print(f"lm score each question max: {lm_prob[torch.arange(num_orig_question),torch.argmax(lm_prob,dim=1)]}")
+            # print(f"retrievers pick lm score: {lm_prob[torch.arange(num_orig_question),retrievers_pick]}")
+            # ### debug
 
-            total_num_correct_pick += (retrievers_pick == torch.argmax(lm_score,dim=1)).sum().item()
-            lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
-            # total_ans_prob += lm_score.exp().sum().item() 
-            total_ans_prob += lm_score.sum().item() 
+            total_num_correct_pick += (retrievers_pick == torch.argmax(lm_prob,dim=1)).sum().item()
+            lm_prob = lm_prob[torch.arange(num_orig_question),retrievers_pick] # [n_question]
+            # total_ans_prob += lm_prob.exp().sum().item() 
+            total_ans_prob += lm_prob.sum().item() 
             # count how many retriever's pick is the same as lm's pick
             all_retriever_pick.extend(retrievers_pick.tolist())
-            retriever_score, lm_score = retriever_score.to("cpu"), lm_score.to("cpu")
-            del retriever_score, lm_score
+            retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
+            del retriever_cossim, lm_prob
             torch.cuda.empty_cache()
 
             # ## Metric 3. Exact match
-            # # reshape from [n_question*n_comb,seq_len] to [n_question,n_comb,seq_len]
-            # batch['prompt_ans_lm_inputs'] = {
-            #     k: v.view(num_orig_question, -1, v.shape[-1]) for k,v in batch['prompt_ans_lm_inputs'].items()
-            # }
-            # # and then take the retriever's pick for each question
-            # batch['prompt_ans_lm_inputs'] = {
-            #     k: v[torch.arange(num_orig_question),retrievers_pick] for k,v in batch['prompt_ans_lm_inputs'].items()
-            # }
-            # refactor into for loop
             for k,v in batch['prompt_ans_lm_inputs'].items():
                 v = v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick]
 
@@ -351,6 +346,7 @@ def validate(
                 device=accelerator.device,
                 max_length=model_max_length,
                 prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
+                accelerator=accelerator,
                 max_tokens_to_generate=args.max_tokens_to_generate,
                 train_step_logdir=train_step_logdir,
                 llm_batch_size=args.llm_batch_size,
@@ -379,6 +375,7 @@ def validate(
         "too_long (%)": total_too_long / total_num_examples * 100,
         "has_answer (%)": total_has_answer / total_num_examples * 100,
         "retriever_pick_acc (%)": total_num_correct_pick / total_num_examples * 100,
+        "retriever_pick_lm_prob": total_retrievers_pick_lm_prob / total_num_examples,
     }
     logger.info(f"Done {train_step_logdir.split('/')[-1]} step validation.")
     for k,v in final_result.items():
@@ -565,13 +562,13 @@ def main():
     lr_scheduler = get_linear_scheduler(optimizer,warmup_steps=args.warmup_steps,total_training_steps=MAX_TRAIN_STEPS)
     completed_steps = 0
 
-    # TODO restore after debug
-    logger.info(f"\n...0 Step Evaluation...")
-    steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
-    if not os.path.exists(steps_log_dir):
-        os.makedirs(steps_log_dir)
-    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir, args.temperature)
-    accelerator.log({"eval":loss}, step=completed_steps)
+    # # TODO restore after debug
+    # logger.info(f"\n...0 Step Evaluation...")
+    # steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
+    # if not os.path.exists(steps_log_dir):
+    #     os.makedirs(steps_log_dir)
+    # loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir, args.temperature)
+    # accelerator.log({"eval":loss}, step=completed_steps)
 
     logger.info("\n***** Running training *****")
     logger.info(f"  Num workers = {args.num_workers}")
@@ -647,9 +644,11 @@ def main():
                         query_embedding = torch.cat(query_list, dim=0)
 
                     logger.debug("...Calculating similarity score from DPR...")
-                    retriever_score = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
+                    query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
+                    doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
+                    retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
                     num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
-                    retriever_score = retriever_score.reshape(num_orig_question, -1)
+                    retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     del query_embedding, doc_embedding  
@@ -658,7 +657,7 @@ def main():
                     logger.debug(f"...Calculating loss from LM on {accelerator.device}...")
                     # very likely to OOM error here
                     if "t5" in args.lm_model:
-                        lm_score = get_t5_lm_score(
+                        lm_prob = get_t5_lm_prob(
                             **batch['prompt_ans_lm_inputs'],
                             model=language_model,
                             device=accelerator.device,
@@ -669,7 +668,7 @@ def main():
                             llm_batch_size=args.llm_batch_size,
                         )
                     else:
-                        lm_score = get_lm_score(
+                        lm_prob = get_lm_prob(
                             **batch['prompt_ans_lm_inputs'],
                             model=language_model,
                             device=accelerator.device,
@@ -679,10 +678,10 @@ def main():
                             llm_batch_size=args.llm_batch_size,
                         )
                     
-                    # move retriever_score back to GPU
-                    retriever_score = retriever_score.to(accelerator.device)
+                    # move retriever_cossim back to GPU
+                    retriever_cossim = retriever_cossim.to(accelerator.device)
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-                    # logger.debug(f"retriever_score.device: {retriever_score.device}; lm_score.device: {lm_score.device}")
+                    # logger.debug(f"retriever_cossim.device: {retriever_cossim.device}; lm_prob.device: {lm_prob.device}")
 
                     # # try to fix RuntimeError: Found dtype Float but expected Half
                     # for param in query_encoder.parameters():
@@ -690,12 +689,12 @@ def main():
                     #     if param.dtype == torch.float32:
                     #         param.data = param.data.to(torch.float16)
                     # try to fix RuntimeError: Found dtype Float but expected Half
-                    retriever_score = retriever_score.half()
-                    lm_score = lm_score.half()
+                    retriever_cossim = retriever_cossim.half()
+                    lm_prob = lm_prob.half()
 
-                    loss = calculate_KL_div_loss(input_logits=retriever_score, target_logits=lm_score, temperature=args.temperature)
-                    retriever_score, lm_score = retriever_score.to("cpu"), lm_score.to("cpu")
-                    del retriever_score, lm_score
+                    loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                    retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
+                    del retriever_cossim, lm_prob
                     logger.debug(f"Finish compute loss. loss = {loss}")
                     logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 

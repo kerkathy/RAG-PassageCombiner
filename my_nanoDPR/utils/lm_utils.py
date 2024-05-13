@@ -63,7 +63,7 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_
 
     return prompt_input_ids, prompt_lengths
 
-def get_t5_lm_score(
+def get_t5_lm_prob(
     input_ids, labels,
     model, device, tokenizer,
     max_length, max_tokens_to_generate, 
@@ -82,7 +82,7 @@ def get_t5_lm_score(
     Then we feed the prompt to the encoder and the answer to the decoder.
     In that case, output of decoder is of has length of the answer, rather than the prompt_ans pair.
     """
-    # print("...In get_t5_lm_score...")
+    # print("...In get_t5_lm_prob...")
     # print("input_ids.shape: ", input_ids.shape)
     # print("labels.shape: ", labels.shape)
     # print("llm_batch_size: ", llm_batch_size)
@@ -119,7 +119,7 @@ def get_t5_lm_score(
     # return log_probs.view(num_orig_question, -1) # [num_orig_question, n_comb]""
 
 
-def get_lm_score(
+def get_lm_prob(
     input_ids, attention_mask, token_type_ids,
     model, device, 
     max_length, max_tokens_to_generate, 
@@ -183,7 +183,7 @@ def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
 
 
 def lm_gen_and_check(
-        model, tokenizer, device, max_length, prompt_ans_lm_inputs,
+        model, tokenizer, device, max_length, prompt_ans_lm_inputs, accelerator,
         max_tokens_to_generate=10, train_step_logdir=".", llm_batch_size=1
 ):
     num_correct = 0
@@ -213,13 +213,22 @@ def lm_gen_and_check(
         # llama generation repeats the prompt, hence special handling
         for input_ids_batch, prompt_length_batch in zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size)):
             with torch.no_grad():
-                output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                # accelerator.unwrap_model(model)
+                # add support to accelerator unwrap
+                if hasattr(model, "module"):
+                    output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                else:
+                    output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(get_batch_answer_from_model_output(generation_strs, prompt_length_batch))
     else:
         for input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
             with torch.no_grad():
-                output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                # add support to accelerator unwrap
+                if hasattr(model, "module"):
+                    output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                else:
+                    output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
 

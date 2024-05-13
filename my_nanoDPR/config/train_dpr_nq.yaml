@@ -4,27 +4,29 @@ dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_r
 train_file: formatted-ms2.nq-train.json
 dev_file: formatted-ms2.nq-dev.json
 dataset_name: nq
+data_size: "1/10"
+index_dir: embeddings/dpr # embeddings/contriever
+# "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
+gold_dev_answers_path: results/nq-dev-answers.json
 
-## training
+## model
 doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
 query_encoder: facebook/dpr-question_encoder-single-nq-base
 lm_model: google/flan-t5-large
 # gpt2, google/flan-t5-large, huggyllama/llama-7b
+## training
 model_parallelism: False
-index_dir: embeddings/dpr # embeddings/contriever
-data_size: "debug"
-# "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
-gold_dev_answers_path: results/nq-dev-answers.json
-max_round: 2
-k: 3
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 16
-llm_batch_size: 16
-max_train_epochs: 1
+max_round: 1
+k: 20
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 256
+llm_batch_size: 256
+max_train_epochs: 60
 num_exemplars: 3
 # debug: set num_worker=0, pin_memory=False
-num_workers: 0
-pin_memory: False
+temperature: 0.1
+num_workers: 4
+pin_memory: True
 auth_token: None
 cache_dir: cache
 adam_eps: 1.0e-8
@@ -36,4 +38,3 @@ seed: 19980406
 gradient_accumulation_steps: 1
 val_check_interval: 1.0
 max_tokens_to_generate: 10
-temperature: 0.1
