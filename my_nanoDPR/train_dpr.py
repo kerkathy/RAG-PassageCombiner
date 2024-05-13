@@ -38,7 +38,7 @@ from utils import (
     text_has_answer,
 )
 
-debug = True  # set log mode to debug, and stop wandb logging
+debug = False  # set log mode to debug, and stop wandb logging
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -76,11 +76,12 @@ def calculate_KL_div_loss(
     """
     global logger
     logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
+    logger.debug(f"target_logits: {F.softmax(target_logits / temperature / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     loss = kl_loss(
         F.log_softmax(input_logits / temperature, dim=1), # input should be a distribution in the log space
-        F.softmax(target_logits / temperature, dim=1),
+        # F.softmax(target_logits / temperature, dim=1),
+        F.softmax(target_logits / temperature / temperature, dim=1),
     )
     return loss
 
@@ -201,7 +202,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
     
 def validate(
         query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
-        accelerator, model_max_length, train_step_logdir
+        accelerator, model_max_length, train_step_logdir, temperature
 ):
     logger.info(f"*** Start validation at {train_step_logdir.split('/')[-1]} ***")
     query_encoder.eval()
@@ -310,9 +311,21 @@ def validate(
             # get its corresponding lm_score
             # note. retriever_score and lm_score are both [n_question,n_comb]
             retrievers_pick = torch.argmax(retriever_score,dim=1) # [n_question]
+
+            ### debug
+            print(f"retriever_score: {retriever_score}")
+            print(f"softmax retriever score: {F.softmax(retriever_score / temperature,dim=1)}")
+            print(f"lm_score: {lm_score}")
+            print(f"softmax lm score: {F.softmax(lm_score / temperature / temperature, dim=1)}")
+            print(f"retrievers_pick: {retrievers_pick}")
+            print(f"lm score each question max: {lm_score[torch.arange(num_orig_question),torch.argmax(lm_score,dim=1)]}")
+            print(f"retrievers pick lm score: {lm_score[torch.arange(num_orig_question),retrievers_pick]}")
+            ### debug
+
             total_num_correct_pick += (retrievers_pick == torch.argmax(lm_score,dim=1)).sum().item()
             lm_score = lm_score[torch.arange(num_orig_question),retrievers_pick] # [n_question]
-            total_ans_prob += lm_score.exp().sum().item() 
+            # total_ans_prob += lm_score.exp().sum().item() 
+            total_ans_prob += lm_score.sum().item() 
             # count how many retriever's pick is the same as lm's pick
             all_retriever_pick.extend(retrievers_pick.tolist())
             retriever_score, lm_score = retriever_score.to("cpu"), lm_score.to("cpu")
@@ -393,7 +406,7 @@ def main():
     accelerator.init_trackers(
         project_name="dpr", 
         config=args,
-        init_kwargs={"wandb":{"name":f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.llm_batch_size})"}}
+        init_kwargs={"wandb":{"name":f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.llm_batch_size}), tmp({args.temperature})"}}
     )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -401,11 +414,11 @@ def main():
         LOG_DIR = wandb_tracker.run.dir
         wandb_tracker.run.log_code(".")
         wandb_tracker.run.tags = [
-            f"data_size: {args.data_size}", f"language_model: {args.lm_model}", 
-            f"query_encoder: {args.query_encoder}", f"doc_encoder: {args.doc_encoder}", 
+            f"size: {args.data_size}", f"lm: {args.lm_model}", 
+            f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
             f"max_round: {args.max_round}", f"k: {args.k}", 
             f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
-            "doc->question", "train", "sep:/n"
+            f"temp: {args.temperature}","newline_format_prompt", "train", 
         ]
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
@@ -557,7 +570,7 @@ def main():
     steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
     if not os.path.exists(steps_log_dir):
         os.makedirs(steps_log_dir)
-    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir, args.temperature)
     accelerator.log({"eval":loss}, step=completed_steps)
 
     logger.info("\n***** Running training *****")
@@ -707,7 +720,7 @@ def main():
                         steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
                         if not os.path.exists(steps_log_dir):
                             os.makedirs(steps_log_dir)
-                        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+                        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir, args.temperature)
                         query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()

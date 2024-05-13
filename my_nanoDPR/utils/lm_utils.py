@@ -103,6 +103,7 @@ def get_t5_lm_score(
         input_ids_batch = input_ids_batch.to(device)
         labels_batch = labels_batch.to(device)
         with torch.no_grad():
+            # t5 shifts labels to the right by one internally
             logits_batch = model(input_ids=input_ids_batch, labels=labels_batch).logits
             eff_batch_size, seq_len, vocab_size = logits_batch.shape
             ce_fn = CrossEntropyLoss(
@@ -114,7 +115,8 @@ def get_t5_lm_score(
     log_probs = torch.cat(log_probs, dim=0)
     # print("Concated log_probs.shape: ", log_probs.shape, "\n")
     # print("log_probs: ", log_probs)
-    return log_probs.view(num_orig_question, -1) # [num_orig_question, n_comb]""
+    return log_probs.view(num_orig_question, -1).exp() # [num_orig_question, n_comb]""
+    # return log_probs.view(num_orig_question, -1) # [num_orig_question, n_comb]""
 
 
 def get_lm_score(
@@ -161,9 +163,9 @@ def get_lm_score(
 
     # compute sequence scores
     # option 1. sum of log probabilities
-    all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1) # TODO: exp or not
+    # all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1) # exp or not...?
     # option 2. joint probability
-    # joint_probs = probs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
+    all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
 
     return all_outputs # [num_orig_question, n_comb]
 
