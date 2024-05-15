@@ -216,7 +216,7 @@ def validate(
     language_model.eval()
     total_loss = 0
     total_ans_prob = 0
-    num_batches = 0
+    num_batches = len(dev_dataloader)
     all_retriever_pick = []
     all_predictions = []
     total_num_correct = 0
@@ -244,9 +244,8 @@ def validate(
         batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
         batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
 
-        # print max input seq len in this batch
-        logger.info(f"[validation step {step}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
-        logger.info(f"[validation step {step}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
+        logger.info(f"[validation step {step}/{num_batches}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
+        logger.info(f"[validation step {step}/{num_batches}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
         
         with torch.no_grad():
             ## Metric 1. Loss
@@ -311,8 +310,6 @@ def validate(
                 )
             logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
-            # TODO add a analysis of the retriever_cossim and lm_prob
-            
             loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
             logger.info(f"[Got KL loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
@@ -364,7 +361,7 @@ def validate(
             all_predictions.extend(batch_result["predictions"])
             total_loss += loss.item() * batch_result["num_examples"]
 
-            num_batches += 1
+            # num_batches += 1
             total_has_answer += batch["num_has_answer"]
 
     # write retriever pick to train_step_logdir
@@ -406,7 +403,7 @@ def main():
     logger.debug("*** IN DEBUG MODE ***")
     logger.info(f"device: {accelerator.device}")
     model_short_name = "flan" if "flan" in args.lm_model else "llama"
-
+    
     accelerator.init_trackers(
         project_name="dpr", 
         config=args,
@@ -414,6 +411,7 @@ def main():
             f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
     )
     # %%
+    # TODO add wandb resume
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
@@ -426,7 +424,9 @@ def main():
             f"temp: {args.temperature}","newline_format_prompt", "train", 
         ]
     else:
-        LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
+        # TODO 改回來
+        LOG_DIR = "./tmp_log_check_ckpt"  # Or any other directory you want to use when debugging
+        # LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
 
@@ -573,13 +573,22 @@ def main():
     lr_scheduler = get_linear_scheduler(optimizer,warmup_steps=args.warmup_steps,total_training_steps=MAX_TRAIN_STEPS)
     completed_steps = 0
 
-    # TODO restore after debug
-    # 0 step validation
-    steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
-    if not os.path.exists(steps_log_dir):
-        os.makedirs(steps_log_dir)
-    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
-    accelerator.log({"eval":loss}, step=completed_steps)
+    # resume training
+    if args.resume_training:
+        logger.info(f"...Loading old state_dict from ckpt {args.resume_path}...")
+        state_dict = torch.load(args.resume_path)
+        query_encoder.load_state_dict(state_dict["query_encoder"])
+        optimizer.load_state_dict(state_dict["optimizer"])
+        lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
+        completed_steps = state_dict["completed_steps"]
+        logger.info(f"...State_dict at step {completed_steps} loaded to query_encoder, optimizer, lr_scheduler...")
+    else:
+        logger.info(f"\n...0 Step Evaluation...")
+        steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
+        if not os.path.exists(steps_log_dir):
+            os.makedirs(steps_log_dir)
+        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+        accelerator.log({"eval":loss}, step=completed_steps)
 
     logger.info("\n***** Running training *****")
     logger.info(f"  Num workers = {args.num_workers}")
@@ -622,8 +631,8 @@ def main():
             batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
         
             # print max input seq len in this batch
-            logger.info(f"[train step {step}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
-            logger.info(f"[train step {step}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
+            logger.info(f"[train step {step} (globally {completed_steps})] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
+            logger.info(f"[train step {step} (globally {completed_steps})] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
             del extended_batch, raw_batch
 
             query_encoder.train()
@@ -739,17 +748,26 @@ def main():
                         accelerator.wait_for_everyone()
                         logger.info(f"[Got every eval subproc] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                         if accelerator.is_local_main_process:
-                            query_encoder_path = os.path.join(steps_log_dir, "query_encoder")
-                            ensure_directory_exists_for_file(query_encoder_path)
-                            query_encoder.save_pretrained(query_encoder_path)
-                            query_tokenizer.save_pretrained(query_encoder_path)
-                            logger.info(f"Checkpoint saved to {LOG_DIR}")
+                            # query_encoder_path = os.path.join(steps_log_dir, "query_encoder")
+                            ckpt_path = os.path.join(steps_log_dir, "checkpoint.pt")
+                            ensure_directory_exists_for_file(ckpt_path)
+                            # unwrap the model from DDP
+                            unwrapped_model = accelerator.unwrap_model(query_encoder)
+                            unwrapped_optimizer = accelerator.unwrap_model(optimizer)
+                            torch.save({
+                                'query_encoder': unwrapped_model.state_dict(),
+                                'optimizer': unwrapped_optimizer.state_dict(),
+                                'lr_scheduler': lr_scheduler.state_dict(),
+                                'completed_steps': completed_steps,}, ckpt_path)
+                            # query_encoder.save_pretrained(query_encoder_path)
+                            # query_tokenizer.save_pretrained(query_encoder_path)
+                            logger.info(f"Checkpoint saved to {ckpt_path}")
                             
                         accelerator.wait_for_everyone()
                 
                 optimizer.step()
                 optimizer.zero_grad()
-                logger.info(f"[Finish step {step} in epoch {epoch}] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                logger.info(f"[Finish step {step} in epoch {epoch} (globally {completed_steps})] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
     
     if accelerator.is_local_main_process:
         logger.info(f"Time spent: {time.time() - start_time} seconds")
