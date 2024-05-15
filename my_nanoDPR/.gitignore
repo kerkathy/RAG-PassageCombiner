@@ -1,5 +1,7 @@
 None/
 tmp_log/
+tmp_log_check_ckpt/
+ircot_ref/
 data
 draft.ipynb
 draft.py
