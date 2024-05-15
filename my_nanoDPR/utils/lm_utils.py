@@ -67,7 +67,7 @@ def get_t5_lm_prob(
     input_ids, labels,
     model, device, tokenizer,
     max_length, max_tokens_to_generate, 
-    num_orig_question, llm_batch_size=1,
+    num_orig_question, llm_batch_size=1, logger=None
 ):
     """
     Take a model and a batch of input_ids, attention_mask, and token_type_ids,
@@ -105,10 +105,12 @@ def get_t5_lm_prob(
         with torch.no_grad():
             # t5 shifts labels to the right by one internally
             logits_batch = model(input_ids=input_ids_batch, labels=labels_batch).logits
+            logger.info(f"[Passed LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             eff_batch_size, seq_len, vocab_size = logits_batch.shape
             ce_fn = CrossEntropyLoss(
                 reduction="none", ignore_index=tokenizer.pad_token_id)
             log_probs_batch = -ce_fn(logits_batch.view(-1, vocab_size), labels_batch.view(-1)) # [eff_batch_size * seq_len]
+            logger.info(f"[Loss calced] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
         log_probs.append(log_probs_batch.view(eff_batch_size, seq_len).sum(dim=-1)) # [eff_batch_size]
         # print("T5 log_probs_batch.shape: ", log_probs[-1].shape)
@@ -123,7 +125,7 @@ def get_lm_prob(
     input_ids, attention_mask, token_type_ids,
     model, device, 
     max_length, max_tokens_to_generate, 
-    num_orig_question, llm_batch_size=1,
+    num_orig_question, llm_batch_size=1, logger=None
 ):
     """
     Take a model and a batch of input_ids, attention_mask, and token_type_ids,
@@ -147,6 +149,7 @@ def get_lm_prob(
 
         with torch.no_grad():
             outputs_batch = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch).logits # [ext_batch_size, seq_len, vocab_size]
+            logger.info(f"[Passed LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             outputs_batch = torch.log_softmax(outputs_batch, dim=-1).detach()
         
         # collect the probability of the generated token
@@ -184,7 +187,7 @@ def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
 
 def lm_gen_and_check(
         model, tokenizer, device, max_length, prompt_ans_lm_inputs, accelerator,
-        max_tokens_to_generate=10, train_step_logdir=".", llm_batch_size=1
+        max_tokens_to_generate=10, llm_batch_size=1, logger=None
 ):
     num_correct = 0
     num_too_long = 0
@@ -217,8 +220,10 @@ def lm_gen_and_check(
                 # add support to accelerator unwrap
                 if hasattr(model, "module"):
                     output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                 else:
                     output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(get_batch_answer_from_model_output(generation_strs, prompt_length_batch))
     else:
@@ -227,14 +232,14 @@ def lm_gen_and_check(
                 # add support to accelerator unwrap
                 if hasattr(model, "module"):
                     output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                 else:
                     output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
 
     for prediction, answer in zip(all_predictions, answers):
-        # print("Prediction: ", prediction)
-        # print("Answer: ", answer, "\n")
         is_correct = exact_match(prediction, answer) # now we only have one ans per example
         # is_correct = any([exact_match(prediction, answer) for answer in answers])
         if is_correct:

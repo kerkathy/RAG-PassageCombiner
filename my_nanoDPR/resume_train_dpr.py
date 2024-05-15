@@ -39,9 +39,6 @@ from utils import (
 )
 
 debug = False  # set log mode to debug, and stop wandb logging
-max_ret_token_len = 0
-max_lm_token_len = 0
-
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -78,11 +75,12 @@ def calculate_KL_div_loss(
     Note: input_logits and target_logits are logits, not distributions
     """
     global logger
-    # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
+    logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
+    logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     loss = kl_loss(
         F.log_softmax(input_logits / temperature, dim=1), # input should be a distribution in the log space
+        # F.softmax(target_logits / temperature, dim=1),
         F.softmax(target_logits / temperature, dim=1),
     )
     return loss
@@ -154,7 +152,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
     # flatten the samples into a list of tuples
     # logger.debug(f"Original batch size: {len(samples)}")
     samples = [item for sublist in samples for item in sublist]
-    # logger.debug(f"Real batch size: {len(samples)}")
+    logger.debug(f"Real batch size: {len(samples)}")
     
     # each item is (query, all_doc, answer, last_doc_embedding)
     query_inputs = ret_tokenizer([x[0] for x in samples], max_length=256, padding=True, truncation=True, return_tensors='pt')
@@ -194,11 +192,6 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
             prompt, answer, max_length=max_length, padding=True, truncation=True, 
             return_tensors='pt', return_token_type_ids=True
         )
-    
-    # update max token length
-    global max_ret_token_len, max_lm_token_len
-    max_ret_token_len = max(max_ret_token_len, query_inputs["input_ids"].shape[1])
-    max_lm_token_len = max(max_lm_token_len, prompt_ans_lm_inputs["input_ids"].shape[1])
 
     return {
         "query_inputs": query_inputs, # dict
@@ -209,7 +202,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
     
 def validate(
         query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
-        accelerator, model_max_length, train_step_logdir
+        accelerator, model_max_length, train_step_logdir, temperature
 ):
     logger.info(f"*** Start validation at {train_step_logdir.split('/')[-1]} ***")
     query_encoder.eval()
@@ -243,25 +236,25 @@ def validate(
         batch["doc_embeddings"] = batch["doc_embeddings"].to(accelerator.device)
         batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
         batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
-
-        # print max input seq len in this batch
-        logger.info(f"[validation step {step}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
-        logger.info(f"[validation step {step}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
         
         with torch.no_grad():
             ## Metric 1. Loss
+            logger.debug("...Sending batch to model...")
+            logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
+            logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
+            logger.debug(f"query_encoder device: {next(query_encoder.parameters()).device}")
             query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
                 if "dpr" in args.query_encoder \
                 else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:] # [bs,n_dim]
             doc_embedding = batch["doc_embeddings"] # 
             
             # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
-            logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
             single_device_query_num, _ = query_embedding.shape
             single_device_doc_num = doc_embedding.shape[0]
 
-            logger.info("...Waiting for everyone...")
+            logger.debug("...Waiting for everyone...")
             if accelerator.use_distributed:
                 doc_list = [torch.zeros_like(doc_embedding) for _ in range(accelerator.num_processes)]
                 dist.all_gather(tensor_list=doc_list, tensor=doc_embedding.contiguous())
@@ -273,19 +266,21 @@ def validate(
                 query_list[dist.get_rank()] = query_embedding
                 query_embedding = torch.cat(query_list, dim=0)
 
+            logger.debug("...Calculating loss from DPR...")
             # convert query_embedding and doc_embedding to unit vectors
             query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
             doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
             num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
             retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
-            logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
             del query_embedding, doc_embedding
             torch.cuda.empty_cache()
-            logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
+            logger.debug("...Calculating loss from LM...")
             if "flan" in args.lm_model:
                 lm_prob = get_t5_lm_prob(
                     **batch['prompt_ans_lm_inputs'],
@@ -295,8 +290,7 @@ def validate(
                     max_length=model_max_length,
                     max_tokens_to_generate=args.max_tokens_to_generate,
                     num_orig_question=num_orig_question,
-                    llm_batch_size=args.eval_llm_batch_size,
-                    logger=logger,
+                    llm_batch_size=args.llm_batch_size,
                 )
             else:
                 lm_prob = get_lm_prob(
@@ -306,15 +300,15 @@ def validate(
                     max_length=model_max_length,
                     max_tokens_to_generate=args.max_tokens_to_generate,
                     num_orig_question=num_orig_question,
-                    llm_batch_size=args.eval_llm_batch_size,
-                    logger=logger,
+                    llm_batch_size=args.llm_batch_size,
                 )
-            logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
             # TODO add a analysis of the retriever_cossim and lm_prob
             
+            logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            logger.debug(f"...Calculating loss...: {torch.cuda.memory_allocated() / 1e6} MB")
             loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
-            logger.info(f"[Got KL loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
             # for each question, take idx of max retriever_cossim 
@@ -341,7 +335,6 @@ def validate(
             retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
             del retriever_cossim, lm_prob
             torch.cuda.empty_cache()
-            logger.info(f"[Emptied scoring cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             # ## Metric 3. Exact match
             for k,v in batch['prompt_ans_lm_inputs'].items():
@@ -355,8 +348,8 @@ def validate(
                 prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
                 accelerator=accelerator,
                 max_tokens_to_generate=args.max_tokens_to_generate,
-                llm_batch_size=args.eval_llm_batch_size,
-                logger=logger,
+                train_step_logdir=train_step_logdir,
+                llm_batch_size=args.llm_batch_size,
             )
             total_num_correct += batch_result["num_correct"]
             total_num_examples += batch_result["num_examples"]
@@ -410,8 +403,7 @@ def main():
     accelerator.init_trackers(
         project_name="dpr", 
         config=args,
-        init_kwargs={"wandb":{"name":
-            f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
+        init_kwargs={"wandb":{"name":f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.llm_batch_size}), tmp({args.temperature})"}}
     )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -541,7 +533,7 @@ def main():
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=args.per_device_train_batch_size,shuffle=True,collate_fn=train_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     dev_dataloader = torch.utils.data.DataLoader(dev_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=dev_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
-    logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
@@ -567,18 +559,15 @@ def main():
     MAX_TRAIN_EPOCHS = math.ceil(MAX_TRAIN_STEPS / NUM_UPDATES_PER_EPOCH)
     TOTAL_TRAIN_BATCH_SIZE = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     EVAL_STEPS = args.val_check_interval if isinstance(args.val_check_interval,int) else int(args.val_check_interval * NUM_UPDATES_PER_EPOCH)
-    if isinstance(args.warmup_steps, float):
-        args.warmup_steps = int(args.warmup_steps * MAX_TRAIN_STEPS)
-        logger.info(f"Converted warmup_steps to {args.warmup_steps}")
     lr_scheduler = get_linear_scheduler(optimizer,warmup_steps=args.warmup_steps,total_training_steps=MAX_TRAIN_STEPS)
     completed_steps = 0
 
     # TODO restore after debug
-    # 0 step validation
+    logger.info(f"\n...0 Step Evaluation...")
     steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
     if not os.path.exists(steps_log_dir):
         os.makedirs(steps_log_dir)
-    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+    loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir, args.temperature)
     accelerator.log({"eval":loss}, step=completed_steps)
 
     logger.info("\n***** Running training *****")
@@ -594,8 +583,7 @@ def main():
     logger.info(f"  Total optimization steps = {MAX_TRAIN_STEPS}")
     logger.info(f"  Num steps per evaluation = {EVAL_STEPS}")
     logger.info(f"  Per device eval batch size = {args.per_device_eval_batch_size}")
-    logger.info(f"  Train LM batch size = {args.train_llm_batch_size}")
-    logger.info(f"  Eval LM batch size = {args.eval_llm_batch_size}")
+    logger.info(f"  LM batch size = {args.llm_batch_size}")
     progress_bar = tqdm(range(MAX_TRAIN_STEPS), disable=not accelerator.is_local_main_process,ncols=100)
 
     start_time = time.time()
@@ -603,8 +591,11 @@ def main():
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
-        logger.info(f"[Before load train data] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+        logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         for step,raw_batch in enumerate(train_dataloader):
+            # TODO go to modify evaluate function after this finish
+            logger.debug(f"... Successfully load batches in epoch {epoch} ...")
+            
             # make raw_batch into a extened batch
             # by first extend each item and then collate_fn
             with torch.no_grad():
@@ -616,33 +607,31 @@ def main():
                 samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
                 lm_name=args.lm_model, args=args
             )
+            del extended_batch, raw_batch
             
             batch["doc_embeddings"] = batch["doc_embeddings"].to(accelerator.device)
             batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
             batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
         
-            # print max input seq len in this batch
-            logger.info(f"[train step {step}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
-            logger.info(f"[train step {step}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
-            del extended_batch, raw_batch
-
             query_encoder.train()
             with accelerator.accumulate(query_encoder): # gradient accumulation
                 with accelerator.autocast():
+                    logger.debug("...Sending batch to model...")
                     # logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
                     # logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
                     query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
                         if "dpr" in args.query_encoder \
                         else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
                     doc_embedding = batch["doc_embeddings"]
-                    logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     
+                    # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
+                    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     # shape of both query_embedding and doc_embedding: [bs,n_dim]
                     # where bs = n_comb * num_orig_question
                     single_device_query_num,_ = query_embedding.shape
                     single_device_doc_num = doc_embedding.shape[0]
 
-                    logger.info("...Waiting for everyone...")
+                    logger.debug("...Waiting for everyone...")
                     if accelerator.use_distributed:
                         doc_list = [torch.zeros_like(doc_embedding) for _ in range(accelerator.num_processes)]
                         dist.all_gather(tensor_list=doc_list, tensor=doc_embedding.contiguous())
@@ -654,18 +643,18 @@ def main():
                         query_list[dist.get_rank()] = query_embedding
                         query_embedding = torch.cat(query_list, dim=0)
 
+                    logger.debug("...Calculating similarity score from DPR...")
                     query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
                     doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
                     retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
                     num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
                     retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
-                    logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
-                    query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
-                    del query_embedding, doc_embedding
-                    torch.cuda.empty_cache()
-                    logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                    del query_embedding, doc_embedding  
+                    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
+                    logger.debug(f"...Calculating loss from LM on {accelerator.device}...")
                     # very likely to OOM error here
                     if "t5" in args.lm_model:
                         lm_prob = get_t5_lm_prob(
@@ -676,8 +665,7 @@ def main():
                             max_length=model_max_length,
                             max_tokens_to_generate=args.max_tokens_to_generate,
                             num_orig_question=num_orig_question,
-                            llm_batch_size=args.train_llm_batch_size,
-                            logger=logger,
+                            llm_batch_size=args.llm_batch_size,
                         )
                     else:
                         lm_prob = get_lm_prob(
@@ -687,14 +675,12 @@ def main():
                             max_length=model_max_length,
                             max_tokens_to_generate=args.max_tokens_to_generate,
                             num_orig_question=num_orig_question,
-                            llm_batch_size=args.train_llm_batch_size,
-                            logger=logger,
+                            llm_batch_size=args.llm_batch_size,
                         )
-                    logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
                     
                     # move retriever_cossim back to GPU
-                    # retriever_cossim = retriever_cossim.to(accelerator.device)
-                    # logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                    retriever_cossim = retriever_cossim.to(accelerator.device)
+                    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     # logger.debug(f"retriever_cossim.device: {retriever_cossim.device}; lm_prob.device: {lm_prob.device}")
 
                     # # try to fix RuntimeError: Found dtype Float but expected Half
@@ -709,12 +695,12 @@ def main():
                     loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
                     retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
                     del retriever_cossim, lm_prob
-                    logger.info(f"[Got KL loss] loss = {loss}; GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                    logger.debug(f"Finish compute loss. loss = {loss}")
+                    logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                 # fix llama error
                 # RuntimeError: Found dtype Float but expected Half
                 accelerator.backward(loss)
-                logger.info(f"[After backward] loss = {loss}; GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
                 ## one optimization step
                 if accelerator.sync_gradients:
@@ -728,16 +714,15 @@ def main():
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
                     if completed_steps % EVAL_STEPS == 0 or completed_steps == MAX_TRAIN_STEPS:
-                        logger.info(f"[Before evaluation] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
-                        logger.info(f"[Before evaluation] max ret token len: {max_ret_token_len}; max lm token len: {max_lm_token_len}")
+                        logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                        logger.info(f"\n...Evaluation...")
                         steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
                         if not os.path.exists(steps_log_dir):
                             os.makedirs(steps_log_dir)
-                        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+                        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir, args.temperature)
                         query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":loss}, step=completed_steps)
                         accelerator.wait_for_everyone()
-                        logger.info(f"[Got every eval subproc] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                         if accelerator.is_local_main_process:
                             query_encoder_path = os.path.join(steps_log_dir, "query_encoder")
                             ensure_directory_exists_for_file(query_encoder_path)
@@ -749,7 +734,7 @@ def main():
                 
                 optimizer.step()
                 optimizer.zero_grad()
-                logger.info(f"[Finish step {step} in epoch {epoch}] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                logger.debug(f"Finish step {step} in epoch {epoch}.\n GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
     if accelerator.is_local_main_process:
         logger.info(f"Time spent: {time.time() - start_time} seconds")
