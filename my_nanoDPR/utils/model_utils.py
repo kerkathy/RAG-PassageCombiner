@@ -4,7 +4,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 def load_query_encoder_and_tokenizer(args, logger):
     logger.info(f"...Loading query encoder model from {args.query_encoder}...")
-    if "dpr" in args.query_encoder:
+    if "dpr" == args.encoder_type:
         from transformers import DPRQuestionEncoder, DPRQuestionEncoderTokenizer
         query_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained(args.query_encoder)
         query_encoder = DPRQuestionEncoder.from_pretrained(args.query_encoder)
@@ -18,7 +18,7 @@ def load_query_encoder_and_tokenizer(args, logger):
 
 def load_doc_encoder_and_tokenizer(args, logger):
     logger.info(f"...Preparing doc encoder...")
-    if "dpr" in args.doc_encoder:
+    if "dpr" == args.encoder_type:
         from transformers import DPRContextEncoder, DPRContextEncoderTokenizer
         doc_tokenizer = DPRContextEncoderTokenizer.from_pretrained(args.doc_encoder)
         doc_encoder = DPRContextEncoder.from_pretrained(args.doc_encoder)
