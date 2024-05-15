@@ -404,25 +404,45 @@ def main():
     logger.info(f"device: {accelerator.device}")
     model_short_name = "flan" if "flan" in args.lm_model else "llama"
     
-    accelerator.init_trackers(
-        project_name="dpr", 
-        config=args,
-        init_kwargs={"wandb":{"name":
-            f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
-    )
+    if args.resume_training:
+        assert os.path.exists(args.resume_path), f"resume_path {args.resume_path} does not exist"
+        logger.info(f"Resuming training from {args.resume_path}")
+        # init tracker without config
+        accelerator.init_trackers(
+            project_name="dpr",
+            # config=args,
+            init_kwargs={"wandb":{"id":args.resume_wandb_id, "resume":"must"}},
+            # init_kwargs={"wandb":{"allow_val_change": True, "id":args.resume_wandb_id, "resume":"must"}},
+        )
+    else:
+        accelerator.init_trackers(
+            project_name="dpr", 
+            config=args,
+            init_kwargs={"wandb":{"name":
+                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
+        )
     # %%
-    # TODO add wandb resume
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
         wandb_tracker.run.log_code(".")
-        wandb_tracker.run.tags = [
-            f"size: {args.data_size}", f"lm: {args.lm_model}", 
-            f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
-            f"max_round: {args.max_round}", f"k: {args.k}", 
-            f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
-            f"temp: {args.temperature}","newline_format_prompt", "train", 
-        ]
+        if not args.resume_training:
+            wandb_tracker.run.tags = [
+                f"size: {args.data_size}", f"lm: {args.lm_model}", 
+                f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
+                f"max_round: {args.max_round}", f"k: {args.k}", 
+                f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
+                f"temp: {args.temperature}","newline_format_prompt", "train", 
+            ]
+        else:
+            # make sure current param is the same as the resumed one
+            # except for resume_training, resume_path, resume_wandb_id
+            exception_keys = ["resume_training", "resume_path", "resume_wandb_id"]
+            for k,v in vars(args).items():
+                if k not in exception_keys:
+                    assert wandb_tracker.run.config[k] == v, \
+                    f"config {k} is different from resumed one: {wandb_tracker.run.config[k]} != {v}"
+            assert args.resume_wandb_id in args.resume_path, f"resume_wandb_id not in resume_path: {args.resume_wandb_id} not in {args.resume_path}"
     else:
         # TODO 改回來
         LOG_DIR = "./tmp_log_check_ckpt"  # Or any other directory you want to use when debugging
@@ -573,7 +593,7 @@ def main():
     lr_scheduler = get_linear_scheduler(optimizer,warmup_steps=args.warmup_steps,total_training_steps=MAX_TRAIN_STEPS)
     completed_steps = 0
 
-    # resume training
+    # TODO: debug
     if args.resume_training:
         logger.info(f"...Loading old state_dict from ckpt {args.resume_path}...")
         state_dict = torch.load(args.resume_path)
