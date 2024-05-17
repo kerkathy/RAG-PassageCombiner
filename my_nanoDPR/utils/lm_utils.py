@@ -9,6 +9,7 @@ def normalize_question(question):
 
     return question[0].lower() + question[1:]
 
+# %%
 def normalize_answer(s):
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
@@ -17,13 +18,14 @@ def normalize_answer(s):
         return " ".join(text.split())
 
     def remove_punc(text):
-        exclude = set(string.punctuation)
+        exclude = set(string.punctuation + '▶')
         return "".join(ch for ch in text if ch not in exclude)
 
     def lower(text):
         return text.lower()
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
+# %%
 
 def exact_match(prediction, ground_truth):
     # TODO 考慮改寬鬆一點
@@ -39,6 +41,7 @@ def text_has_answer(answers, text) -> bool:
             return True
     return False
 
+# %%
 def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False):
     """
     Consider input_ids and token_type_ids as a batch of prompt-answer pairs.
@@ -47,21 +50,20 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_
     """
     ans_start_pos = (token_type_ids == 1).float().argmax(dim=1) # [bs]
     prompt_mask = torch.arange(input_ids.size(1)).expand_as(input_ids).to(device) < ans_start_pos.unsqueeze(1).to(device) # broadcast to [bs, seq_len]
-    prompt_input_ids = input_ids * prompt_mask.to(device) # [bs, seq_len]
+    # mask the answer part into pad tokens
+    prompt_input_ids = input_ids * prompt_mask.to(device) # [bs, seq_len] #
     prompt_input_ids[prompt_input_ids == 0] = tokenizer.pad_token_id
-    prompt_lengths = prompt_mask.sum(dim=1)
-    # decode the prompt ids to check if the prompt is correct
-    prompt_strs = tokenizer.batch_decode(prompt_input_ids.cpu(), skip_special_tokens=True)
-    # print("Separated prompt: ", prompt_strs)
+    # Count only the prompt token length (excluding the answer part and the padding tokens)
+    prompt_ids_lengths = prompt_input_ids.ne(tokenizer.pad_token_id).sum(dim=1) # [bs]
 
     if return_ans:
         ans_input_ids = input_ids * ~prompt_mask.to(device) # [bs, seq_len]
         # decode the answer ids to check if the answer is correct
         ans_strs = tokenizer.batch_decode(ans_input_ids.cpu(), skip_special_tokens=True)
-        # print("Separated answer: ", ans_strs)
-        return prompt_input_ids, prompt_lengths, ans_input_ids
+        return prompt_input_ids, prompt_ids_lengths, ans_input_ids
 
-    return prompt_input_ids, prompt_lengths
+    return prompt_input_ids, prompt_ids_lengths
+# %%
 
 def get_t5_lm_prob(
     input_ids, labels,
@@ -172,60 +174,70 @@ def get_lm_prob(
 
     return all_outputs # [num_orig_question, n_comb]
 
-
+# %%
 def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
     """
     For evaluation. Given a batch of model outputs, return the answer strings
     """
     answers = []
     for i, generation_str in enumerate(generation_strs):
+        # print(f"{i}th uncut generation_str: {generation_str}")
+        # fix!!! 好像有差一點 10 token (max_gen_token?)
+        # fix!! 因為 pad 左側所以會有問題
         generation_str = generation_str[prompt_lengths[i]:]
         answer = generation_str.split("\n")[0]
         answers.append(answer)
+        print(f"{i}th cutted generation_str: {generation_str}; answer: {answer}")
     return answers
+# %%
 
 
 def lm_gen_and_check(
         model, tokenizer, device, max_length, prompt_ans_lm_inputs, accelerator,
         max_tokens_to_generate=10, llm_batch_size=1, logger=None
 ):
-    num_correct = 0
+    # %%
     num_too_long = 0
-    all_predictions = []
 
+    # preprocess: separate prompt and answer
     if "t5" in tokenizer.name_or_path:
         # t5 generation has no constraint on the length
         answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
-        prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
+        # all_prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
         all_prompt_input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
     else:
         input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
         token_type_ids = prompt_ans_lm_inputs["token_type_ids"].to(device) # token_type_ids = 0 for prompt, 1 for answer
-        # get decoded answers
         answers = [tokenizer.decode(input_ids[i, token_type_ids[i] == 1], skip_special_tokens=True) for i in range(input_ids.shape[0])]
-        # extract prompt ids and prompt lengths from input_ids
-        all_prompt_input_ids, prompt_lengths = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False)
+        all_prompt_input_ids, _ = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False)
+        # %%
         del prompt_ans_lm_inputs
+        # %%
         # constraint the length of the prompt
-        for prompt_input_ids in all_prompt_input_ids:
+        for i, prompt_input_ids in enumerate(all_prompt_input_ids):
             if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
                 num_too_long += 1
-                prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
+                all_prompt_input_ids[i] = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
+    # %%
+    # generate
+    all_predictions = []
+    all_prompt_strs = [] # debugging
     if "llama" in tokenizer.name_or_path:
-        # llama generation repeats the prompt, hence special handling
-        for input_ids_batch, prompt_length_batch in zip(all_prompt_input_ids.split(llm_batch_size), prompt_lengths.split(llm_batch_size)):
+        # %%
+        for prompt_input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
             with torch.no_grad():
-                # accelerator.unwrap_model(model)
-                # add support to accelerator unwrap
-                if hasattr(model, "module"):
-                    output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
-                    logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-                else:
-                    output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
-                    logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                output_batch = model.generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
-            all_predictions.extend(get_batch_answer_from_model_output(generation_strs, prompt_length_batch))
+            prompt_strs = tokenizer.batch_decode(prompt_input_ids_batch.cpu(), skip_special_tokens=True)
+            # remove the prompt part from the generated output because the model repeats the prompt
+            for i, (generation_str, prompt_str) in enumerate(zip(generation_strs, prompt_strs)):
+                answer = generation_str.replace(prompt_str, "").split("\n")[0]
+                all_predictions.append(answer)
+                # logger.debug(f"generation_str: {generation_str}\nanswer: {answer}")
+
+            all_prompt_strs.extend(prompt_strs)
+    # %%
     else:
         for input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
             with torch.no_grad():
@@ -239,15 +251,20 @@ def lm_gen_and_check(
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
 
+    # %%
+    # create a file to save the prompt strs with indent
+    # import json
+    # with open("prompt_strs.json", "w") as f:
+    #     json.dump(all_prompt_strs, f, indent=4)
+
+    # %%
+    num_correct = 0
     for prediction, answer in zip(all_predictions, answers):
         is_correct = exact_match(prediction, answer) # now we only have one ans per example
         # is_correct = any([exact_match(prediction, answer) for answer in answers])
         if is_correct:
             num_correct += 1
 
-    num_data = len(prompt_lengths)
-    # em = num_correct / num_data * 100
-
-    result = {"num_correct": num_correct, "num_examples": num_data, "too_long": num_too_long, "predictions": all_predictions}
-
+    result = {"num_correct": num_correct, "num_examples": len(answers), "too_long": num_too_long, "predictions": [normalize_answer(prediction) for prediction in all_predictions]}
+    # %%
     return result

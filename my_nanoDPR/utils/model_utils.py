@@ -33,7 +33,11 @@ def load_doc_encoder_and_tokenizer(args, logger):
 def load_lm_tokenizer(model_name):
     if "llama" in model_name:
         from transformers import LlamaTokenizer
-        return LlamaTokenizer.from_pretrained(model_name)
+        lm_tokenizer = LlamaTokenizer.from_pretrained(model_name)
+        lm_tokenizer.pad_token = "[PAD]"
+        lm_tokenizer.padding_side = "left"
+        return lm_tokenizer
+        # return LlamaTokenizer.from_pretrained(model_name, padding_side="left", pad_token="[PAD]")
     return AutoTokenizer.from_pretrained(model_name)
 
 

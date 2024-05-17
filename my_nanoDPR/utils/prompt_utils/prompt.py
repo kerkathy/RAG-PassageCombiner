@@ -15,38 +15,53 @@
 
 from utils.prompt_utils.nq_shots import get_nq_exemplars
 
-llama_prompt_no_doc = """[INST] <<SYS>>
-Answer the Question below considering the Document provided.
-Your answer can only be an entity name or a short phrase.
+# llama_2_prompt_no_doc = """[INST] <<SYS>>
+# Answer the Question below considering the Document provided.
+# Your answer can only be an entity name or a short phrase.
 
-Examples:
-{exemplars}
+# Examples:
+# {exemplars}
 
-<</SYS>>
+# <</SYS>>
 
+# Question: {question}
+# Answer: [/INST]
+# """
+
+# llama_2_prompt_with_doc = """[INST] <<SYS>>
+# Answer the Question below considering the Document provided.
+# Your answer can only be an entity name or a short phrase.
+
+# Examples:
+# {exemplars}
+
+# Document: {documents}
+# <</SYS>>
+
+# Question: {question}
+# Answer: [/INST]
+# """
+
+llama_prompt_no_doc = """{exemplars}
+
+Answer these questions:
 Question: {question}
-Answer: [/INST]
+Answer:
 """
 
-llama_prompt_with_doc = """[INST] <<SYS>>
-Answer the Question below considering the Document provided.
-Your answer can only be an entity name or a short phrase.
-
-Examples:
-{exemplars}
+llama_prompt_with_doc = """{exemplars}
 
 Document: {documents}
-<</SYS>>
-
+Based on these texts, answer these questions: 
 Question: {question}
-Answer: [/INST]
+Answer:
 """
 
 flan_prompt_no_doc = """Give an answer to the answerable question.
 {exemplars}
 
 Question: {question}
-Answer:"
+Answer:
 """
 
 flan_prompt_with_doc = """Give an answer to the question.
@@ -54,7 +69,7 @@ flan_prompt_with_doc = """Give an answer to the question.
 
 Context: {documents}
 Question: {question}
-Answer:"
+Answer:
 """
 
 prompt_collection = {
@@ -83,7 +98,7 @@ def make_prompt(question, documents, lm_name, num_docs, num_exemplars, dataset):
     else:
         raise ValueError("dataset only support nq now.")
     
-    if documents == None:
+    if num_docs == 0:
         return prompt_collection[lm_name]["no_doc"].format(
             exemplars="\n\n".join(exemplars), question=question
         )
