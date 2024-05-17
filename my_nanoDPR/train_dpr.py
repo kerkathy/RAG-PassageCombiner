@@ -544,19 +544,19 @@ def main():
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
         with torch.no_grad():
-            if not os.path.exists(args.train_index_path):
+            if not os.path.exists(train_index_path):
                 logger.info(f"...Creating train index with size {len(train_corpus)}...")
                 train_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
-                torch.save(train_doc_embeddings, args.train_index_path)
-            if not os.path.exists(args.dev_index_path):
+                torch.save(train_doc_embeddings, train_index_path)
+            if not os.path.exists(dev_index_path):
                 logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
                 dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
-                torch.save(dev_doc_embeddings, args.dev_index_path)
-            if not os.path.exists(args.empty_doc_embedding_path):
+                torch.save(dev_doc_embeddings, dev_index_path)
+            if not os.path.exists(empty_doc_embedding_path):
                 logger.info(f"...Creating empty embedding ...")
                 empty_doc_embedding = make_index(["[UNK]"], doc_tokenizer, doc_encoder).squeeze() # for empty document
-                torch.save(empty_doc_embedding, args.empty_doc_embedding_path)
-        logger.info(f"Index saved to {args.train_index_path}, {args.dev_index_path}, {args.empty_doc_embedding_path}")
+                torch.save(empty_doc_embedding, empty_doc_embedding_path)
+        logger.info(f"Index saved to {train_index_path}, {dev_index_path}, {empty_doc_embedding_path}")
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
         logger.info("...Deleting doc_encoder...")
