@@ -89,6 +89,26 @@ def calculate_KL_div_loss(
     )
     return loss
 
+def calculate_cross_entropy_loss(
+    input_logits, # [n_question,n_comb]
+    target_logits, # [n_question,n_comb]
+    temperature,
+):
+    """
+    Calculate cross entropy loss between input and target logits
+    Take the argmax of target_logits as the label
+    """
+    global logger
+    # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
+    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
+    ce_loss = nn.CrossEntropyLoss()
+    input_logits = input_logits / temperature
+    loss = ce_loss(
+        input=input_logits, # input is expected to contain the unnormalized logits for each class
+        target=torch.argmax(target_logits, dim=1),
+    )
+    return loss 
+
 class QADataset(torch.utils.data.Dataset):
     def __init__(self, qa_pairs, all_corpus, all_doc_embeddings):
         self.qa_pairs = qa_pairs
@@ -317,9 +337,12 @@ def validate(
                 )
             logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
-            loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+            if args.loss_type == "kl_div":
+                loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+            else:
+                loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
             total_loss += loss.item() * len(batch['query_inputs']['input_ids'])
-            logger.info(f"[Got KL loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
             # for each question, take idx of max retriever_cossim 
@@ -428,7 +451,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
+                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -437,7 +460,7 @@ def main():
         wandb_tracker.run.log_code(".")
         if not args.resume_training:
             wandb_tracker.run.tags = [
-                f"size: {args.data_size}", f"lm: {args.lm_model}", 
+                f"size: {args.data_size}", f"lm: {args.lm_model}", f"loss: {args.loss_type}",
                 f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
                 f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
@@ -749,10 +772,15 @@ def main():
                     retriever_cossim = retriever_cossim.half()
                     lm_prob = lm_prob.half()
 
-                    loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                    if args.loss_type == "kl_div":
+                        loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                    else:
+                        loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                    logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+
                     retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
                     del retriever_cossim, lm_prob
-                    logger.info(f"[Got KL loss] loss = {loss}; GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                    torch.cuda.empty_cache()
 
                 # fix llama error
                 # RuntimeError: Found dtype Float but expected Half

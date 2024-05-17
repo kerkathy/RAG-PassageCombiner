@@ -4,7 +4,7 @@ dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_r
 train_file: formatted-ms2.nq-train.json
 dev_file: formatted-ms2.nq-dev.json
 dataset_name: nq
-data_size: "1/10"
+data_size: "full"
 index_dir: embeddings/dpr # embeddings/contriever
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
 gold_dev_answers_path: results/nq-dev-answers.json
@@ -17,16 +17,17 @@ resume_wandb_id:
 doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
 # query_encoder: wandb/run-20240513_225200-ja1uhk3w/files/step-2506/query_encoder/
 query_encoder: facebook/dpr-question_encoder-single-nq-base
-lm_model: huggyllama/llama-7b
+lm_model: google/flan-t5-large
 # gpt2, google/flan-t5-large, huggyllama/llama-7b
 ## training
+loss_type: "ce" # kl_div, ce
 model_parallelism: True
-max_round: 1
+max_round: 2
 k: 3
-per_device_train_batch_size: 1
-train_llm_batch_size: 2
-per_device_eval_batch_size: 3
-eval_llm_batch_size: 3
+per_device_train_batch_size: 5
+train_llm_batch_size: 10
+per_device_eval_batch_size: 10
+eval_llm_batch_size: 20
 max_train_epochs: 1
 num_exemplars: 3
 # debug: set num_worker=0, pin_memory=False

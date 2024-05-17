@@ -20,6 +20,7 @@ query_encoder: facebook/dpr-question_encoder-single-nq-base
 lm_model: huggyllama/llama-7b
 # gpt2, google/flan-t5-large, huggyllama/llama-7b
 ## training
+loss_type: "ce" # kl_div, ce
 model_parallelism: False
 max_round: 1
 k: 1
