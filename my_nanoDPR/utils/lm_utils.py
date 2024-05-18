@@ -42,7 +42,7 @@ def text_has_answer(answers, text) -> bool:
     return False
 
 # %%
-def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False):
+def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device):
     """
     Consider input_ids and token_type_ids as a batch of prompt-answer pairs.
     Given input_ids and token_type_ids, return the prompt input_ids and prompt lengths.
@@ -54,15 +54,12 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_
     prompt_input_ids = input_ids * prompt_mask.to(device) # [bs, seq_len] #
     prompt_input_ids[prompt_input_ids == 0] = tokenizer.pad_token_id
     # Count only the prompt token length (excluding the answer part and the padding tokens)
-    prompt_ids_lengths = prompt_input_ids.ne(tokenizer.pad_token_id).sum(dim=1) # [bs]
+    # prompt_ids_lengths = prompt_input_ids.ne(tokenizer.pad_token_id).sum(dim=1) # [bs]
+    # create attention mask where 0 is for padding tokens
+    # attention_mask = prompt_input_ids.ne(tokenizer.pad_token_id).float() # [bs, seq_len]
 
-    if return_ans:
-        ans_input_ids = input_ids * ~prompt_mask.to(device) # [bs, seq_len]
-        # decode the answer ids to check if the answer is correct
-        ans_strs = tokenizer.batch_decode(ans_input_ids.cpu(), skip_special_tokens=True)
-        return prompt_input_ids, prompt_ids_lengths, ans_input_ids
+    return prompt_input_ids
 
-    return prompt_input_ids, prompt_ids_lengths
 # %%
 
 def get_t5_lm_prob(
@@ -209,7 +206,7 @@ def lm_gen_and_check(
         input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
         token_type_ids = prompt_ans_lm_inputs["token_type_ids"].to(device) # token_type_ids = 0 for prompt, 1 for answer
         answers = [tokenizer.decode(input_ids[i, token_type_ids[i] == 1], skip_special_tokens=True) for i in range(input_ids.shape[0])]
-        all_prompt_input_ids, _ = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device, return_ans=False)
+        all_prompt_input_ids = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device)
         # %%
         del prompt_ans_lm_inputs
         # %%
@@ -222,21 +219,42 @@ def lm_gen_and_check(
     # %%
     # generate
     all_predictions = []
-    all_prompt_strs = [] # debugging
     if "llama" in tokenizer.name_or_path:
-        # %%
-        for prompt_input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
+        #%%
+        # new version: decode the prompt to get original prompt
+        # and then encode it one by one, to avoid the padding issue
+        for i, prompt_input_ids in enumerate(all_prompt_input_ids):
+            prompt_str = tokenizer.decode(prompt_input_ids, skip_special_tokens=True)
+            # tokenize
+            prompt_input_ids = tokenizer(prompt_str, return_tensors="pt").input_ids.to(device)
             with torch.no_grad():
-                output_batch = model.generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
-            generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
-            prompt_strs = tokenizer.batch_decode(prompt_input_ids_batch.cpu(), skip_special_tokens=True)
-            # remove the prompt part from the generated output because the model repeats the prompt
-            for i, (generation_str, prompt_str) in enumerate(zip(generation_strs, prompt_strs)):
-                answer = generation_str.replace(prompt_str, "").split("\n")[0]
-                all_predictions.append(answer)
-                # logger.debug(f"generation_str: {generation_str}\nanswer: {answer}")
+                output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
+            generation_str = tokenizer.decode(output[0], skip_special_tokens=True)
+            answer = generation_str.replace(prompt_str, "").split("\n")[0]
+            all_predictions.append(answer)
+            # logger.debug(f"prompt_str: {prompt_str}")
+            # logger.debug(f"generation_str: {generation_str}")
+            # logger.debug(f"answer: {answer}")
 
-            all_prompt_strs.extend(prompt_strs)
+        # # below: old version 
+        # for prompt_input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
+        #     with torch.no_grad():
+        #         # add support to accelerator unwrap
+        #         if hasattr(model, "module"):
+        #             output_batch = accelerator.unwrap_model(model).generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
+        #             logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+        #         else:
+        #             output_batch = model.generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
+        #             logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+        #     generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
+        #     prompt_strs = tokenizer.batch_decode(prompt_input_ids_batch.cpu(), skip_special_tokens=True)
+        #     # remove the prompt part from the generated output because the model repeats the prompt
+        #     for i, (generation_str, prompt_str) in enumerate(zip(generation_strs, prompt_strs)):
+        #         answer = generation_str.replace(prompt_str, "").split("\n")[0]
+        #         all_predictions.append(answer)
+        #         logger.debug(f"generation_str: {generation_str}\nanswer: {answer}")
+
+        #     all_prompt_strs.extend(prompt_strs)
     # %%
     else:
         for input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
@@ -251,11 +269,6 @@ def lm_gen_and_check(
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
 
-    # %%
-    # create a file to save the prompt strs with indent
-    # import json
-    # with open("prompt_strs.json", "w") as f:
-    #     json.dump(all_prompt_strs, f, indent=4)
 
     # %%
     num_correct = 0

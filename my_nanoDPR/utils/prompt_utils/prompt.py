@@ -12,7 +12,6 @@
 # https://github.com/google-research/FLAN/blob/main/flan/v2/flan_templates_branched.py
 
 
-
 from utils.prompt_utils.nq_shots import get_nq_exemplars
 
 # llama_2_prompt_no_doc = """[INST] <<SYS>>
@@ -42,35 +41,42 @@ from utils.prompt_utils.nq_shots import get_nq_exemplars
 # Answer: [/INST]
 # """
 
-llama_prompt_no_doc = """{exemplars}
+# if we're using llama1, then FEW-SHOT WON'T WORK!!!!!!
+# llama_prompt_no_doc = """{exemplars}
 
-Answer these questions:
-Question: {question}
-Answer:
-"""
+# Answer these questions:
+# Q: {question}
+# A:
+# """
+llama_prompt_no_doc = """Answer these questions:
+Q: {question}
+A:"""
 
-llama_prompt_with_doc = """{exemplars}
+# llama_prompt_with_doc = """{exemplars}
 
-Document: {documents}
-Based on these texts, answer these questions: 
-Question: {question}
-Answer:
-"""
+# {documents}
+# Based on these texts, answer these questions:
+# Q: {question}
+# A:
+# """
+llama_prompt_with_doc = """{documents}
+
+Based on these texts, answer these questions:
+Q: {question}
+A:"""
 
 flan_prompt_no_doc = """Give an answer to the answerable question.
 {exemplars}
 
 Question: {question}
-Answer:
-"""
+Answer:"""
 
 flan_prompt_with_doc = """Give an answer to the question.
 {exemplars}
 
 Context: {documents}
 Question: {question}
-Answer:
-"""
+Answer:"""
 
 prompt_collection = {
     "llama": {

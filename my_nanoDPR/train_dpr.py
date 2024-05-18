@@ -38,7 +38,7 @@ from utils import (
     text_has_answer,
 )
 
-debug = False  # set log mode to debug, and stop wandb logging
+debug = False # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -478,8 +478,7 @@ def main():
             assert args.resume_wandb_id in args.resume_path, f"resume_wandb_id not in resume_path: {args.resume_wandb_id} not in {args.resume_path}"
     else:
         # TODO 改回來
-        LOG_DIR = "./tmp_log_check_ckpt"  # Or any other directory you want to use when debugging
-        # LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
+        LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
 
@@ -514,7 +513,7 @@ def main():
 
     logger.info("...Loading data...")
     # skip data used as exemplars
-    train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))[args.num_exemplars:]
+    train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))[args.num_exemplars:] # skip those exemplars
     dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
@@ -532,7 +531,7 @@ def main():
     if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
         logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 
         # skip those exemplars
-        train_doc_embeddings = torch.load(train_index_path)[args.num_exemplars:]
+        train_doc_embeddings = torch.load(train_index_path)[args.num_exemplars:] # skip those exemplars
         dev_doc_embeddings = torch.load(dev_index_path)
         empty_doc_embedding = torch.load(empty_doc_embedding_path)
         assert len(train_doc_embeddings) == len(train_corpus), f"len(train_doc_embeddings) ({len(train_doc_embeddings)}) != len(train_corpus), ({len(train_corpus)})"
