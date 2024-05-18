@@ -107,7 +107,8 @@ def llama_exemplars(num_exemplars, num_docs, documents, ctxt_indicator):
     return [f"""Answer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
     for i in range(num_exemplars)]
   else:
-    return [f"""{ctxt_indicator}: {documents[i]}\nBased on these texts, answer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    return [f"""Given the following information:\n{documents[i]}\nAnswer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    # return [f"""{ctxt_indicator}: {documents[i]}\nBased on these texts, answer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
     for i in range(num_exemplars)]
 
 def get_nq_exemplars(lm_name, num_docs, num_exemplars):

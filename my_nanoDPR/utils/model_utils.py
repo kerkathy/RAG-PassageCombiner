@@ -37,7 +37,7 @@ def load_lm_tokenizer(model_name):
         lm_tokenizer.pad_token = "[PAD]"
         lm_tokenizer.padding_side = "left"
         return lm_tokenizer
-        # return LlamaTokenizer.from_pretrained(model_name, padding_side="left", pad_token="[PAD]")
+        # return LlamaTokenizer.from_pretrained(model_name, padding_side="left", pad_token="[PAD]") # cause CUDA error
     return AutoTokenizer.from_pretrained(model_name)
 
 
