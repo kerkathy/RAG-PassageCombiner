@@ -513,7 +513,7 @@ def main():
 
     logger.info("...Loading data...")
     # skip data used as exemplars
-    train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))[args.num_exemplars:] # skip those exemplars
+    train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))
     dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
@@ -531,7 +531,7 @@ def main():
     if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
         logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 
         # skip those exemplars
-        train_doc_embeddings = torch.load(train_index_path)[args.num_exemplars:] # skip those exemplars
+        train_doc_embeddings = torch.load(train_index_path)
         dev_doc_embeddings = torch.load(dev_index_path)
         empty_doc_embedding = torch.load(empty_doc_embedding_path)
         assert len(train_doc_embeddings) == len(train_corpus), f"len(train_doc_embeddings) ({len(train_doc_embeddings)}) != len(train_corpus), ({len(train_corpus)})"
@@ -563,6 +563,12 @@ def main():
         del doc_encoder
         torch.cuda.empty_cache()
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+
+    # take the [args.num_exemplars:] 
+    train_corpus = [x[args.num_exemplars:] for x in train_corpus]
+    dev_corpus = [x[args.num_exemplars:] for x in dev_corpus]
+    train_doc_embeddings = [x[args.num_exemplars:] for x in train_doc_embeddings]
+    dev_doc_embeddings = [x[args.num_exemplars:] for x in dev_doc_embeddings]
 
     # %%
     gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
