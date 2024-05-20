@@ -2,6 +2,7 @@ import re
 import string
 import torch
 from torch.nn import CrossEntropyLoss
+from tqdm import tqdm
 
 def normalize_question(question):
     if not question.endswith("?"):
@@ -204,56 +205,40 @@ def lm_gen_and_check(
     
     if "llama" in tokenizer.name_or_path:
         # %%
-        i = 0 # debug
+        # i = 0 # debug
         # constraint the length of the prompt
         answers = []
         # each iteration takes llm_batch_size examples using index
-        cur_index = 0
-        while cur_index < len(prompt_ans_lm_inputs["input_ids"]):
-            prompt_batch = prompt_strs[cur_index:cur_index + llm_batch_size]
-            prompt_inputs_batch = tokenizer(prompt_batch, return_tensors="pt", padding=True, truncation=True)
-            prompt_input_ids_batch = prompt_inputs_batch["input_ids"].to(device)
-            prompt_mask_batch = prompt_inputs_batch["attention_mask"].to(device)
+        for i, prompt_str in tqdm(enumerate(prompt_strs), desc="Generating", total=len(prompt_strs)):
+            prompt_input_ids = tokenizer(prompt_str, return_tensors="pt").input_ids.to(device)
 
-            if prompt_input_ids_batch.shape[-1] > max_length - max_tokens_to_generate:
+            if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
                 num_too_long += 1
-                prompt_input_ids_batch = prompt_input_ids_batch[..., -(max_length - max_tokens_to_generate):]
+                prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
             with torch.no_grad():
                 if "llama-3" in tokenizer.name_or_path.lower():
-                    output_batch = model.generate(
-                        prompt_input_ids_batch, 
+                    output = model.generate(
+                        prompt_input_ids, 
                         max_new_tokens=max_tokens_to_generate, 
                         pad_token_id=tokenizer.eos_token_id, 
                         eos_token_id=[tokenizer.eos_token_id,tokenizer.convert_tokens_to_ids("<|eot_id|>")],
                     )
                 else:
-                    output_batch = model.generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
 
             # decode one by one
-            for i in range(len(output_batch)):
-                prompt_length = prompt_mask_batch[i].sum().item()
-                generation_str = tokenizer.decode(output_batch[i][prompt_length:], skip_special_tokens=True)
-                all_predictions.append(generation_str)
-                # get answers from prompt_ans_lm_inputss where token_type_ids == 1
-                truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
-                answers.append(truth)
-                # debug
-                print(f"Prediction: {generation_str}")
-                print(f"True Answer: {truth}")
-                i += 1
-            
-            # generation_str = tokenizer.decode(output[0][prompt_input_ids.shape[-1]:], skip_special_tokens=True)
-            # all_predictions.append(generation_str)
+            generation_str = tokenizer.decode(output[0][prompt_input_ids.shape[-1]:], skip_special_tokens=True)
+            all_predictions.append(generation_str)
+            # get answers from prompt_ans_lm_inputss where token_type_ids == 1
+            truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
+            answers.append(truth)
 
-            # # get answers from prompt_ans_lm_inputss where token_type_ids == 1
-            # truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
-            # answers.append(truth)
-
-            # # debug
+            # debug
             # print(f"Prediction: {generation_str}")
             # print(f"True Answer: {truth}")
             # i += 1
+            
     # %%
     else:
         # t5 generation has no constraint on the length

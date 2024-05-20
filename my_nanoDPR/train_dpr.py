@@ -38,10 +38,9 @@ from utils import (
     text_has_answer,
 )
 
-debug = True # set log mode to debug, and stop wandb logging
+debug = False # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
-
 
 logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
 logger = get_logger(__name__)
@@ -225,15 +224,15 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
     max_ret_token_len = max(max_ret_token_len, query_inputs["input_ids"].shape[1])
     max_lm_token_len = max(max_lm_token_len, prompt_ans_lm_inputs["input_ids"].shape[1])
 
-    # if "llama" in lm_name.lower() and mode == "eval":
-    #     # also returns prompt
-    #     return {
-    #         "query_inputs": query_inputs, # dict
-    #         "doc_embeddings": doc_embeddings, # tensor, [bs,n_dim]
-    #         "prompt_ans_lm_inputs": prompt_ans_lm_inputs, # dict
-    #         "num_has_answer": num_has_answer, # int
-    #         "prompt_strs": prompt, # list[str]
-    #     }
+    if "llama" in lm_name.lower() and mode == "eval":
+        # also returns prompt
+        return {
+            "query_inputs": query_inputs, # dict
+            "doc_embeddings": doc_embeddings, # tensor, [bs,n_dim]
+            "prompt_ans_lm_inputs": prompt_ans_lm_inputs, # dict
+            "num_has_answer": num_has_answer, # int
+            "prompt_strs": prompt, # list[str]
+        }
 
     return {
         "query_inputs": query_inputs, # dict
@@ -395,7 +394,7 @@ def validate(
                 device=accelerator.device,
                 max_length=model_max_length,
                 prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
-                # prompt_strs = batch["prompt_strs"] if "llama" in args.lm_model.lower() else None,
+                prompt_strs = batch["prompt_strs"] if "llama" in args.lm_model.lower() else None,
                 accelerator=accelerator,
                 max_tokens_to_generate=args.max_tokens_to_generate,
                 llm_batch_size=args.eval_llm_batch_size,
@@ -448,7 +447,12 @@ def main():
     )
     logger.debug("*** IN DEBUG MODE ***")
     logger.info(f"device: {accelerator.device}")
-    model_short_name = "flan" if "flan" in args.lm_model else "llama"
+    if "flan" in args.lm_model:
+        model_short_name = "flan"
+    elif "llama-3" in args.lm_model.lower():
+        model_short_name = "llama3"
+    elif "llama" in args.lm_model.lower():
+        model_short_name = "llama"
     
     if args.resume_training:
         assert os.path.exists(args.resume_path), f"resume_path {args.resume_path} does not exist"
@@ -471,7 +475,6 @@ def main():
         LOG_DIR = wandb_tracker.run.dir
         CKPT_DIR = os.path.join(args.ckpt_dir, wandb_tracker.run.id)
         wandb_tracker.run.log_code(".")
-        wandb_tracker.log_code("./utils/")
         if not args.resume_training:
             wandb_tracker.run.tags = [
                 f"size: {args.data_size}", f"lm: {args.lm_model}", f"loss: {args.loss_type}",
