@@ -195,82 +195,65 @@ def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
 
 
 def lm_gen_and_check(
-        model, tokenizer, device, max_length, prompt_ans_lm_inputs,
+        model, tokenizer, device, max_length, prompt_ans_lm_inputs, prompt_strs,
         accelerator, max_tokens_to_generate=10, llm_batch_size=1, logger=None
 ):
-
     # %%
     num_too_long = 0
     all_predictions = []
-
+    
     if "llama" in tokenizer.name_or_path:
-        input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
-        token_type_ids = prompt_ans_lm_inputs["token_type_ids"].to(device) # token_type_ids = 0 for prompt, 1 for answer
-        all_mask = prompt_ans_lm_inputs["attention_mask"].to(device)
-        answers = [tokenizer.decode(input_ids[i, token_type_ids[i] == 1], skip_special_tokens=True) for i in range(input_ids.shape[0])]
-        
-        all_prompt_input_ids = input_ids
-        all_prompt_input_ids[token_type_ids == 1] = tokenizer.pad_token_id # new
-        all_mask[token_type_ids == 1] = 0 # new
-        # all_prompt_input_ids = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device) # old
         # %%
-        token_type_ids = token_type_ids.to("cpu")
-        del prompt_ans_lm_inputs, token_type_ids
-        torch.cuda.empty_cache()
-
-        # %%
+        i = 0 # debug
         # constraint the length of the prompt
-        for i, prompt_input_ids in enumerate(all_prompt_input_ids):
-            if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
-                num_too_long += 1
-                all_prompt_input_ids[i] = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
-                all_mask[i] = all_mask[i][..., -(max_length - max_tokens_to_generate):]
+        answers = []
+        # each iteration takes llm_batch_size examples using index
+        cur_index = 0
+        while cur_index < len(prompt_ans_lm_inputs["input_ids"]):
+            prompt_batch = prompt_strs[cur_index:cur_index + llm_batch_size]
+            prompt_inputs_batch = tokenizer(prompt_batch, return_tensors="pt", padding=True, truncation=True)
+            prompt_input_ids_batch = prompt_inputs_batch["input_ids"].to(device)
+            prompt_mask_batch = prompt_inputs_batch["attention_mask"].to(device)
 
-        # %%
-        # new version: decode the prompt to get original prompt
-        # and then encode it one by one, to avoid the padding issue
-        for i, (prompt_input_ids, mask) in enumerate(zip(all_prompt_input_ids, all_mask)):
-            prompt_str = tokenizer.decode(prompt_input_ids, skip_special_tokens=True)
-            # tokenize
-            prompt_input_ids = tokenizer(prompt_str, return_tensors="pt").input_ids.to(device)
+            if prompt_input_ids_batch.shape[-1] > max_length - max_tokens_to_generate:
+                num_too_long += 1
+                prompt_input_ids_batch = prompt_input_ids_batch[..., -(max_length - max_tokens_to_generate):]
+
             with torch.no_grad():
                 if "llama-3" in tokenizer.name_or_path.lower():
-                    output = model.generate(
-                        prompt_input_ids, 
+                    output_batch = model.generate(
+                        prompt_input_ids_batch, 
                         max_new_tokens=max_tokens_to_generate, 
                         pad_token_id=tokenizer.eos_token_id, 
                         eos_token_id=[tokenizer.eos_token_id,tokenizer.convert_tokens_to_ids("<|eot_id|>")],
-                        attention_mask=mask.unsqueeze(0)
                     )
-
                 else:
-                    output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
-            generation_str = tokenizer.decode(output[0], skip_special_tokens=True)
-            answer = generation_str.replace(prompt_str, "").split("\n")[0]
-            all_predictions.append(answer)
-            # logger.debug(f"prompt_str: {prompt_str}")
-            # logger.debug(f"generation_str: {generation_str}")
-            # logger.debug(f"answer: {answer}")
+                    output_batch = model.generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
 
-        # # below: old version 
-        # for prompt_input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
-        #     with torch.no_grad():
-        #         # add support to accelerator unwrap
-        #         if hasattr(model, "module"):
-        #             output_batch = accelerator.unwrap_model(model).generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
-        #             logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-        #         else:
-        #             output_batch = model.generate(prompt_input_ids_batch, max_new_tokens=max_tokens_to_generate)
-        #             logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-        #     generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
-        #     prompt_strs = tokenizer.batch_decode(prompt_input_ids_batch.cpu(), skip_special_tokens=True)
-        #     # remove the prompt part from the generated output because the model repeats the prompt
-        #     for i, (generation_str, prompt_str) in enumerate(zip(generation_strs, prompt_strs)):
-        #         answer = generation_str.replace(prompt_str, "").split("\n")[0]
-        #         all_predictions.append(answer)
-        #         logger.debug(f"generation_str: {generation_str}\nanswer: {answer}")
+            # decode one by one
+            for i in range(len(output_batch)):
+                prompt_length = prompt_mask_batch[i].sum().item()
+                generation_str = tokenizer.decode(output_batch[i][prompt_length:], skip_special_tokens=True)
+                all_predictions.append(generation_str)
+                # get answers from prompt_ans_lm_inputss where token_type_ids == 1
+                truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
+                answers.append(truth)
+                # debug
+                print(f"Prediction: {generation_str}")
+                print(f"True Answer: {truth}")
+                i += 1
+            
+            # generation_str = tokenizer.decode(output[0][prompt_input_ids.shape[-1]:], skip_special_tokens=True)
+            # all_predictions.append(generation_str)
 
-        #     all_prompt_strs.extend(prompt_strs)
+            # # get answers from prompt_ans_lm_inputss where token_type_ids == 1
+            # truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
+            # answers.append(truth)
+
+            # # debug
+            # print(f"Prediction: {generation_str}")
+            # print(f"True Answer: {truth}")
+            # i += 1
     # %%
     else:
         # t5 generation has no constraint on the length
@@ -288,7 +271,6 @@ def lm_gen_and_check(
                     logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
-
 
     # %%
     num_correct = 0
