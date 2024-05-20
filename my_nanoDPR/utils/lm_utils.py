@@ -136,6 +136,8 @@ def get_lm_prob(
     if input_ids.shape[-1] > max_length - max_tokens_to_generate:
         num_too_long += 1
         input_ids = input_ids[..., -(max_length - max_tokens_to_generate):]
+        attention_mask = attention_mask[..., -(max_length - max_tokens_to_generate):]
+        token_type_ids = token_type_ids[..., -(max_length - max_tokens_to_generate):]
     if num_too_long > 0:
         print("Num too long: ", num_too_long)
 

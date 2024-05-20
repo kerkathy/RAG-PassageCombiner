@@ -451,13 +451,15 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size})"}}
+                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
+        CKPT_DIR = os.path.join(args.ckpt_dir, wandb_tracker.run.id)
         wandb_tracker.run.log_code(".")
+        wandb_tracker.run.log_code("./utils/")
         if not args.resume_training:
             wandb_tracker.run.tags = [
                 f"size: {args.data_size}", f"lm: {args.lm_model}", f"loss: {args.loss_type}",
@@ -489,7 +491,8 @@ def main():
 
     logger.info("...Loading language models...")
     language_model, lm_tokenizer, lm_config = load_lm_model_and_tokenizer(
-        args.lm_model, device=accelerator.device, model_parallelism=args.model_parallelism, cache_dir=args.cache_dir, auth_token=args.auth_token
+        args.lm_model, device=accelerator.device, quantized=args.quantized,
+        model_parallelism=args.model_parallelism, cache_dir=args.cache_dir, auth_token=args.auth_token
     )
     language_model.eval()
 
@@ -570,20 +573,20 @@ def main():
     train_doc_embeddings = [x[args.num_exemplars:] for x in train_doc_embeddings]
     dev_doc_embeddings = [x[args.num_exemplars:] for x in dev_doc_embeddings]
 
-    # %%
-    gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
-    if not os.path.exists(gold_path):
-        logger.info(f"...Creating gold answers for dev set...")
-        ensure_directory_exists_for_file(gold_path)
-        gold_answers = []
-        for sample in dev_data:
-            gold_answers.append(sample['answers']) # log all answer 
-            # gold_answers.append(sample['answers'][0])
-        with open(gold_path, "w") as f:
-            for ans in gold_answers:
-                f.write(str(ans) + "\n")
-        logger.info(f"Gold answers saved to {gold_path}")
-        del gold_answers
+    # # %%
+    # gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
+    # if not os.path.exists(gold_path):
+    #     logger.info(f"...Creating gold answers for dev set...")
+    #     ensure_directory_exists_for_file(gold_path)
+    #     gold_answers = []
+    #     for sample in dev_data:
+    #         gold_answers.append(sample['answers']) # log all answer 
+    #         # gold_answers.append(sample['answers'][0])
+    #     with open(gold_path, "w") as f:
+    #         for ans in gold_answers:
+    #             f.write(str(ans) + "\n")
+    #     logger.info(f"Gold answers saved to {gold_path}")
+    #     del gold_answers
 
     # TODO add feature of empty doc representation
     train_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'][0], empty_doc_embedding) for sample in train_data]
@@ -670,6 +673,8 @@ def main():
     progress_bar = tqdm(range(MAX_TRAIN_STEPS), disable=not accelerator.is_local_main_process,ncols=100)
 
     start_time = time.time()
+
+    best_eval_loss = float("inf")
 
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
@@ -815,20 +820,24 @@ def main():
                         accelerator.wait_for_everyone()
                         logger.info(f"[Got every eval subproc] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                         if accelerator.is_local_main_process:
-                            # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
-                            ckpt_path = os.path.join(train_step_logdir, "checkpoint.pt")
-                            ensure_directory_exists_for_file(ckpt_path)
-                            # unwrap the model from DDP
-                            unwrapped_model = accelerator.unwrap_model(query_encoder)
-                            unwrapped_optimizer = accelerator.unwrap_model(optimizer)
-                            torch.save({
-                                'query_encoder': unwrapped_model.state_dict(),
-                                'optimizer': unwrapped_optimizer.state_dict(),
-                                'lr_scheduler': lr_scheduler.state_dict(),
-                                'completed_steps': completed_steps,}, ckpt_path)
-                            # query_encoder.save_pretrained(query_encoder_path)
-                            # query_tokenizer.save_pretrained(query_encoder_path)
-                            logger.info(f"Checkpoint saved to {ckpt_path}")
+                            # only save the best model to dist (don't save to wandb dir)
+                            if loss["exact_match (%)"] < best_eval_loss:
+                                best_eval_loss = loss
+
+                                # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
+                                ckpt_path = os.path.join(CKPT_DIR, f"checkpoint-{completed_steps}.pt")
+                                ensure_directory_exists_for_file(ckpt_path)
+                                # unwrap the model from DDP
+                                unwrapped_model = accelerator.unwrap_model(query_encoder)
+                                unwrapped_optimizer = accelerator.unwrap_model(optimizer)
+                                torch.save({
+                                    'query_encoder': unwrapped_model.state_dict(),
+                                    'optimizer': unwrapped_optimizer.state_dict(),
+                                    'lr_scheduler': lr_scheduler.state_dict(),
+                                    'completed_steps': completed_steps,}, ckpt_path)
+                                # query_encoder.save_pretrained(query_encoder_path)
+                                # query_tokenizer.save_pretrained(query_encoder_path)
+                                logger.info(f"Checkpoint saved to {ckpt_path}")
                             
                         accelerator.wait_for_everyone()
                 
