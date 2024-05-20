@@ -107,8 +107,19 @@ def llama_exemplars(num_exemplars, num_docs, documents, ctxt_indicator):
     return [f"""Answer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
     for i in range(num_exemplars)]
   else:
-    return [f"""Given the following information:\n{documents[i]}\nAnswer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
-    # return [f"""{ctxt_indicator}: {documents[i]}\nBased on these texts, answer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    # return [f"""Given the following information:\n{documents[i]}\nAnswer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    return [f"""{ctxt_indicator}: {documents[i]}\nBased on these texts, answer these questions:\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    for i in range(num_exemplars)]
+
+def llama_3_exemplars(num_exemplars, num_docs, documents, ctxt_indicator):
+  global qa_pairs
+  if num_docs == 0:
+    return [f"""{qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    # return [f"""Question: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
+    for i in range(num_exemplars)]
+  else:
+    return [f"""Given the following information, {qa_pairs[i][0]}\n{documents[i]}\nAnswer: {qa_pairs[i][1]}"""
+    # return [f"""{ctxt_indicator}: {documents[i]}\nQuestion: {qa_pairs[i][0]}\nAnswer: {qa_pairs[i][1]}"""
     for i in range(num_exemplars)]
 
 def get_nq_exemplars(lm_name, num_docs, num_exemplars):
@@ -123,10 +134,13 @@ def get_nq_exemplars(lm_name, num_docs, num_exemplars):
   assert num_exemplars <= len(qa_pairs), f"num_exemplars should be less than or equal to {len(qa_pairs)}"
 
   documents = ["\n".join(doc[:num_docs]) for doc in docs_supplement]
-  if "flan" in lm_name:
+  if "flan" == lm_name:
     exemplars = flan_exemplars(num_exemplars, num_docs, documents, "Context")
 
-  elif "llama" in lm_name:
+  elif "llama3" == lm_name:
+    exemplars = llama_3_exemplars(num_exemplars, num_docs, documents, "Knowledge")
+
+  elif "llama" == lm_name:
     exemplars = llama_exemplars(num_exemplars, num_docs, documents, "Document")
 
   return exemplars

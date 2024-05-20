@@ -11,9 +11,7 @@
 # flan prompt src
 # https://github.com/google-research/FLAN/blob/main/flan/v2/flan_templates_branched.py
 
-
-from utils.prompt_utils.nq_shots import get_nq_exemplars
-
+# %%
 # llama_2_prompt_no_doc = """[INST] <<SYS>>
 # Answer the Question below considering the Document provided.
 # Your answer can only be an entity name or a short phrase.
@@ -48,35 +46,52 @@ from utils.prompt_utils.nq_shots import get_nq_exemplars
 # Q: {question}
 # A:
 # """
-llama_prompt_no_doc = """Answer these questions:
-Q: {question}
-A:"""
+# %%
+from utils.prompt_utils.nq_shots import get_nq_exemplars
 
-# llama_prompt_with_doc = """{exemplars}
+"""for llama3"""
+# my mimic of the apply_chat_template
+chat_prompt_template = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-# {documents}
-# Based on these texts, answer these questions:
-# Q: {question}
-# A:
-# """
-llama_prompt_with_doc = """{documents}
+{SYS_PROMPT}<|eot_id|><|start_header_id|>user<|end_header_id|>
 
-Based on these texts, answer these questions:
-Q: {question}
-A:"""
+{USER_PROMPT}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
-flan_prompt_no_doc = """Give an answer to the answerable question.
-{exemplars}
+"""
+# terminators = [
+#     tokenizer.eos_token_id,
+#     tokenizer.convert_tokens_to_ids("<|eot_id|>")
+# ]
 
-Question: {question}
-Answer:"""
+llama3_sys_prompt_no_doc = """You are an assistant for directly answering questions in a compact way.
+Provide a very short answer that contains only necessary entities.
+For example:
+Question: Who is the president of the United States?
+Answer: Joe Biden"""
+llama3_sys_prompt_with_doc = """You are an assistant for directly answering questions in a compact way.
+You are given the extracted parts of a long document and a question. Provide a very short answer that contains only necessary entities.
+For example:
+Question: Who is the president of the United States?
+Context: Recently, Joe Biden was elected as the president of the United States.
+Answer: Joe Biden"""
 
-flan_prompt_with_doc = """Give an answer to the question.
-{exemplars}
+def format_llama3_user_prompt(question,retrieved_documents,k):
+    """using the retrieved documents we will prompt the model to generate our responses"""
+    USER_PROMPT = f"Question:{question}\n"
+    if retrieved_documents == []:
+        return USER_PROMPT
+    USER_PROMPT+= "Context:"
+    for idx in range(k) :
+        USER_PROMPT+= f"{retrieved_documents[idx]}\n"
+    return USER_PROMPT
 
-Context: {documents}
-Question: {question}
-Answer:"""
+
+"""for llama1 and flan"""
+llama_prompt_no_doc = "Answer these questions:\nQuestion: {question}\nAnswer:"
+llama_prompt_with_doc = "{exemplars}\n\nDocument: {documents}\nBased on these texts, answer these questions:\nQuestion: {question}\nAnswer:"
+
+flan_prompt_no_doc = "Give an answer to the answerable question.\n\n{exemplars}\n\nQuestion: {question}\nAnswer:"
+flan_prompt_with_doc = "Give an answer to the question.\n\n{exemplars}\n\nContext: {documents}\nQuestion: {question}\nAnswer:"
 
 prompt_collection = {
     "llama": {
@@ -89,8 +104,16 @@ prompt_collection = {
     }
 }
 
-def make_prompt(question, documents, lm_name, num_docs, num_exemplars, dataset):
-    if "llama" in lm_name:
+def make_prompt(question, documents, lm_name, num_exemplars, dataset):
+    assert isinstance(documents, list), "When make_prompt(), documents should be a list of strings."
+    documents = [doc for doc in documents if doc != ""]
+    num_docs = len(documents)
+
+    if "llama-3" in lm_name.lower():
+        lm_name = "llama3"
+        if num_exemplars != 1:
+            raise ValueError("When make_prompt(), llama-3 should always use num_exemplars=1.")
+    elif "llama" in lm_name:
         lm_name = "llama"
     elif "flan" in lm_name:
         lm_name = "flan"
@@ -98,6 +121,14 @@ def make_prompt(question, documents, lm_name, num_docs, num_exemplars, dataset):
         lm_name = "flan" # tmp hack
     else:
         raise ValueError("lm_name only support llama or flan now.")
+    
+    if lm_name == "llama3":
+        # raise NotImplementedError("llama3 is not implemented yet.")
+        formatted_prompt = format_llama3_user_prompt(question, documents, num_docs)
+        sys_prompt = llama3_sys_prompt_no_doc if num_docs == 0 else llama3_sys_prompt_with_doc
+        # remove the ending newline if any
+        sys_prompt, formatted_prompt = sys_prompt.strip(), formatted_prompt.strip()
+        return chat_prompt_template.format(SYS_PROMPT=sys_prompt, USER_PROMPT=formatted_prompt)
     
     if dataset == "nq":
         exemplars = get_nq_exemplars(lm_name, num_docs, num_exemplars)

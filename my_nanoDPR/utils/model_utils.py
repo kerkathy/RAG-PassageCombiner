@@ -34,11 +34,15 @@ def load_lm_tokenizer(model_name):
     if "llama-7b" in model_name:
         from transformers import LlamaTokenizer
         lm_tokenizer = LlamaTokenizer.from_pretrained(model_name)
-        lm_tokenizer.pad_token = "[PAD]"
-        lm_tokenizer.padding_side = "left"
+        # lm_tokenizer.pad_token = "[PAD]"
+        # lm_tokenizer.padding_side = "left" # it's no use setting this here. Set it in main insead
         return lm_tokenizer
         # return LlamaTokenizer.from_pretrained(model_name, padding_side="left", pad_token="[PAD]") # cause CUDA error
-    return AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # if "llama-3" in model_name.lower():
+    #     print("Using LLAMA-3 tokenizer")
+    #     tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
 
 # TODO 改這裡成跟 accelerate 兼容的樣子
 # https://github.com/huggingface/accelerate/issues/2163

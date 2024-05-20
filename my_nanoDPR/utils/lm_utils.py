@@ -48,17 +48,20 @@ def separate_prompt_answer(input_ids, token_type_ids, tokenizer, device):
     Given input_ids and token_type_ids, return the prompt input_ids and prompt lengths.
     Optionally return the answer input_ids as well.
     """
-    ans_start_pos = (token_type_ids == 1).float().argmax(dim=1) # [bs]
-    prompt_mask = torch.arange(input_ids.size(1)).expand_as(input_ids).to(device) < ans_start_pos.unsqueeze(1).to(device) # broadcast to [bs, seq_len]
+    input_ids[token_type_ids == 1] = tokenizer.pad_token_id
+
+    # old version
+    # ans_start_pos = (token_type_ids == 1).float().argmax(dim=1) # [bs]
+    # prompt_mask = torch.arange(input_ids.size(1)).expand_as(input_ids).to(device) < ans_start_pos.unsqueeze(1).to(device) # broadcast to [bs, seq_len]
     # mask the answer part into pad tokens
-    prompt_input_ids = input_ids * prompt_mask.to(device) # [bs, seq_len] #
-    prompt_input_ids[prompt_input_ids == 0] = tokenizer.pad_token_id
+    # prompt_input_ids = input_ids * prompt_mask.to(device) # [bs, seq_len] #
+    # prompt_input_ids[prompt_input_ids == 0] = tokenizer.pad_token_id
     # Count only the prompt token length (excluding the answer part and the padding tokens)
     # prompt_ids_lengths = prompt_input_ids.ne(tokenizer.pad_token_id).sum(dim=1) # [bs]
     # create attention mask where 0 is for padding tokens
     # attention_mask = prompt_input_ids.ne(tokenizer.pad_token_id).float() # [bs, seq_len]
 
-    return prompt_input_ids
+    return input_ids
 
 # %%
 
@@ -192,45 +195,56 @@ def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
 
 
 def lm_gen_and_check(
-        model, tokenizer, device, max_length, prompt_ans_lm_inputs, accelerator,
-        max_tokens_to_generate=10, llm_batch_size=1, logger=None
+        model, tokenizer, device, max_length, prompt_ans_lm_inputs,
+        accelerator, max_tokens_to_generate=10, llm_batch_size=1, logger=None
 ):
+
     # %%
     num_too_long = 0
+    all_predictions = []
 
-    # preprocess: separate prompt and answer
-    if "t5" in tokenizer.name_or_path:
-        # t5 generation has no constraint on the length
-        answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
-        # all_prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
-        all_prompt_input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
-    else:
+    if "llama" in tokenizer.name_or_path:
         input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
         token_type_ids = prompt_ans_lm_inputs["token_type_ids"].to(device) # token_type_ids = 0 for prompt, 1 for answer
+        all_mask = prompt_ans_lm_inputs["attention_mask"].to(device)
         answers = [tokenizer.decode(input_ids[i, token_type_ids[i] == 1], skip_special_tokens=True) for i in range(input_ids.shape[0])]
-        all_prompt_input_ids = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device)
+        
+        all_prompt_input_ids = input_ids
+        all_prompt_input_ids[token_type_ids == 1] = tokenizer.pad_token_id # new
+        all_mask[token_type_ids == 1] = 0 # new
+        # all_prompt_input_ids = separate_prompt_answer(input_ids, token_type_ids, tokenizer, device) # old
         # %%
-        del prompt_ans_lm_inputs
+        token_type_ids = token_type_ids.to("cpu")
+        del prompt_ans_lm_inputs, token_type_ids
+        torch.cuda.empty_cache()
+
         # %%
         # constraint the length of the prompt
         for i, prompt_input_ids in enumerate(all_prompt_input_ids):
             if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
                 num_too_long += 1
                 all_prompt_input_ids[i] = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
+                all_mask[i] = all_mask[i][..., -(max_length - max_tokens_to_generate):]
 
-    # %%
-    # generate
-    all_predictions = []
-    if "llama" in tokenizer.name_or_path:
-        #%%
+        # %%
         # new version: decode the prompt to get original prompt
         # and then encode it one by one, to avoid the padding issue
-        for i, prompt_input_ids in enumerate(all_prompt_input_ids):
+        for i, (prompt_input_ids, mask) in enumerate(zip(all_prompt_input_ids, all_mask)):
             prompt_str = tokenizer.decode(prompt_input_ids, skip_special_tokens=True)
             # tokenize
             prompt_input_ids = tokenizer(prompt_str, return_tensors="pt").input_ids.to(device)
             with torch.no_grad():
-                output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
+                if "llama-3" in tokenizer.name_or_path.lower():
+                    output = model.generate(
+                        prompt_input_ids, 
+                        max_new_tokens=max_tokens_to_generate, 
+                        pad_token_id=tokenizer.eos_token_id, 
+                        eos_token_id=[tokenizer.eos_token_id,tokenizer.convert_tokens_to_ids("<|eot_id|>")],
+                        attention_mask=mask.unsqueeze(0)
+                    )
+
+                else:
+                    output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
             generation_str = tokenizer.decode(output[0], skip_special_tokens=True)
             answer = generation_str.replace(prompt_str, "").split("\n")[0]
             all_predictions.append(answer)
@@ -259,6 +273,10 @@ def lm_gen_and_check(
         #     all_prompt_strs.extend(prompt_strs)
     # %%
     else:
+        # t5 generation has no constraint on the length
+        answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
+        # all_prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
+        all_prompt_input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
         for input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
             with torch.no_grad():
                 # add support to accelerator unwrap

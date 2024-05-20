@@ -38,7 +38,7 @@ from utils import (
     text_has_answer,
 )
 
-debug = False # set log mode to debug, and stop wandb logging
+debug = True # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -167,7 +167,7 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
     return data  # List of tuples
 
 
-def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
+def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode="train"):
     """
     samples: List[List[tuple]]
     """
@@ -186,7 +186,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
     # in each item, num_docs shuold be num items where x[1][i] != "" (empty doc holder)
     prompt = [make_prompt(
         question=x[0], documents=x[1], lm_name=lm_name, 
-        num_docs=len([doc for doc in x[1] if doc != ""]),
+        # num_docs=len([doc for doc in x[1] if doc != ""]),
         num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
     answer = [x[2] for x in samples]
     num_has_answer = 0
@@ -204,6 +204,9 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
         labels = lm_tokenizer(answer, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids
         prompt_ans_lm_inputs = {"input_ids": input_ids, "labels": labels}
     else:
+        if "Llama-3" in lm_name:
+            max_length = 8000
+            lm_tokenizer.pad_token_id = lm_tokenizer.eos_token_id
         if "Llama-2" in lm_name:
             max_length = 4096
         elif "llama-" in lm_name: # llama 1
@@ -221,6 +224,16 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args):
     global max_ret_token_len, max_lm_token_len
     max_ret_token_len = max(max_ret_token_len, query_inputs["input_ids"].shape[1])
     max_lm_token_len = max(max_lm_token_len, prompt_ans_lm_inputs["input_ids"].shape[1])
+
+    # if "llama" in lm_name.lower() and mode == "eval":
+    #     # also returns prompt
+    #     return {
+    #         "query_inputs": query_inputs, # dict
+    #         "doc_embeddings": doc_embeddings, # tensor, [bs,n_dim]
+    #         "prompt_ans_lm_inputs": prompt_ans_lm_inputs, # dict
+    #         "num_has_answer": num_has_answer, # int
+    #         "prompt_strs": prompt, # list[str]
+    #     }
 
     return {
         "query_inputs": query_inputs, # dict
@@ -261,7 +274,7 @@ def validate(
             ) for x in raw_batch]
         batch = inloop_collate_fn(
             samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
-            lm_name=args.lm_model, args=args
+            lm_name=args.lm_model, args=args, mode="eval"
         )
         del extended_batch, raw_batch
         
@@ -382,6 +395,7 @@ def validate(
                 device=accelerator.device,
                 max_length=model_max_length,
                 prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
+                # prompt_strs = batch["prompt_strs"] if "llama" in args.lm_model.lower() else None,
                 accelerator=accelerator,
                 max_tokens_to_generate=args.max_tokens_to_generate,
                 llm_batch_size=args.eval_llm_batch_size,
@@ -442,9 +456,7 @@ def main():
         # init tracker without config
         accelerator.init_trackers(
             project_name="dpr",
-            # config=args,
             init_kwargs={"wandb":{"id":args.resume_wandb_id, "resume":"must"}},
-            # init_kwargs={"wandb":{"allow_val_change": True, "id":args.resume_wandb_id, "resume":"must"}},
         )
     else:
         accelerator.init_trackers(
@@ -459,7 +471,7 @@ def main():
         LOG_DIR = wandb_tracker.run.dir
         CKPT_DIR = os.path.join(args.ckpt_dir, wandb_tracker.run.id)
         wandb_tracker.run.log_code(".")
-        wandb_tracker.run.log_code("./utils/")
+        wandb_tracker.log_code("./utils/")
         if not args.resume_training:
             wandb_tracker.run.tags = [
                 f"size: {args.data_size}", f"lm: {args.lm_model}", f"loss: {args.loss_type}",
@@ -479,8 +491,9 @@ def main():
                     f"config {k} is different from resumed one: {wandb_tracker.run.config[k]} != {v}"
             assert args.resume_wandb_id in args.resume_path, f"resume_wandb_id not in resume_path: {args.resume_wandb_id} not in {args.resume_path}"
     else:
-        # TODO 改回來
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
+        CKPT_DIR = "./tmp_ckpt"
+    ensure_directory_exists_for_file(CKPT_DIR)
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
 
@@ -500,7 +513,7 @@ def main():
     # only pad if model is gpt2
     if "gpt2" in args.lm_model or "llama" in args.lm_model:
         lm_tokenizer.pad_token = "[PAD]"
-        lm_tokenizer.padding_side = "right"
+        lm_tokenizer.padding_side = "right" # TODO in llama1, should pad left??
     logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     if args.data_size == "debug":
@@ -651,8 +664,8 @@ def main():
         if not os.path.exists(train_step_logdir):
             os.makedirs(train_step_logdir)
     # %%
-        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir)
-        accelerator.log({"eval":loss}, step=completed_steps)
+        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir)
+        accelerator.log({"eval":eval_result}, step=completed_steps)
 
     # %%
     logger.info("\n***** Running training *****")
@@ -674,7 +687,7 @@ def main():
 
     start_time = time.time()
 
-    best_eval_loss = float("inf")
+    best_em = eval_result["exact_match (%)"]
 
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
@@ -690,7 +703,7 @@ def main():
                 ) for x in raw_batch]
             batch = inloop_collate_fn(
                 samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
-                lm_name=args.lm_model, args=args
+                lm_name=args.lm_model, args=args, mode="train"
             )
             
             batch["doc_embeddings"] = batch["doc_embeddings"].to(accelerator.device)
@@ -797,7 +810,7 @@ def main():
                 accelerator.backward(loss)
                 logger.info(f"[After backward] loss = {loss}; GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
-                ## one optimization step
+                # one optimization step
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     progress_bar.set_postfix(loss=f"{loss:.4f}",lr=f"{lr_scheduler.get_last_lr()[0]:6f}")
@@ -814,15 +827,17 @@ def main():
                         train_step_logdir = os.path.join(LOG_DIR,f"step-{completed_steps}")
                         if not os.path.exists(train_step_logdir):
                             os.makedirs(train_step_logdir)
-                        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir)
+                        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir)
                         query_encoder.train() # Make sure the model is back in training mode after validation
-                        accelerator.log({"eval":loss}, step=completed_steps)
+                        accelerator.log({"eval":eval_result}, step=completed_steps)
                         accelerator.wait_for_everyone()
                         logger.info(f"[Got every eval subproc] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                         if accelerator.is_local_main_process:
                             # only save the best model to dist (don't save to wandb dir)
-                            if loss["exact_match (%)"] < best_eval_loss:
-                                best_eval_loss = loss
+                            logger.info(f"best_em: {best_em}")
+                            logger.info(f"exact_match: {eval_result['exact_match (%)']}")
+                            if eval_result["exact_match (%)"] > best_em:
+                                best_em = eval_result["exact_match (%)"]
 
                                 # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
                                 ckpt_path = os.path.join(CKPT_DIR, f"checkpoint-{completed_steps}.pt")
@@ -849,7 +864,7 @@ def main():
         logger.info(f"Time spent: {time.time() - start_time} seconds")
         logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
         logger.info("...!!Congrats!! Training finished :) ...")
-        logger.info(f"Checkpoint saved to {LOG_DIR}")
+        logger.info(f"Checkpoint saved to {CKPT_DIR}")
         if not debug:
             wandb_tracker.finish()
     

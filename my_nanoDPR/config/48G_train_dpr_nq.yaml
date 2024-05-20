@@ -8,6 +8,7 @@ data_size: "debug"
 index_dir: embeddings/dpr # embeddings/contriever
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
 gold_dev_answers_path: results/nq-dev-answers.json
+ckpt_dir: ckpt
 
 ## model
 encoder_type: dpr # dpr, contriever, bert...
@@ -17,8 +18,9 @@ resume_wandb_id:
 doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
 # query_encoder: wandb/run-20240513_225200-ja1uhk3w/files/step-2506/query_encoder/
 query_encoder: facebook/dpr-question_encoder-single-nq-base
-lm_model: huggyllama/llama-7b
-# gpt2, google/flan-t5-large, huggyllama/llama-7b
+lm_model: meta-llama/Meta-Llama-3-8B
+quantize: True
+# gpt2, google/flan-t5-large, huggyllama/llama-7b, meta-llama/Meta-Llama-3-8B
 ## training
 loss_type: "ce" # kl_div, ce
 model_parallelism: False

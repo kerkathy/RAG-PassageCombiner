@@ -4,32 +4,34 @@ dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_r
 train_file: formatted-ms2.nq-train.json
 dev_file: formatted-ms2.nq-dev.json
 dataset_name: nq
-data_size: "full"
-index_dir: embeddings/dpr # embeddings/contriever
+data_size: "debug"
+index_dir: embeddings/dpr # embeddings/contriever embeddings/dpr
 # "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10)
 gold_dev_answers_path: results/nq-dev-answers.json
+ckpt_dir: ckpt
 
 ## model
-encoder_type: dpr # dpr, contriever, bert...
 resume_training: 
 resume_path:
 resume_wandb_id:
-doc_encoder: facebook/dpr-ctx_encoder-single-nq-base # facebook/contriever 
+encoder_type: contriever # dpr, contriever, bert...
+doc_encoder: facebook/contriever  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever 
 # query_encoder: wandb/run-20240513_225200-ja1uhk3w/files/step-2506/query_encoder/
-query_encoder: facebook/dpr-question_encoder-single-nq-base
-lm_model: google/flan-t5-large
-# gpt2, google/flan-t5-large, huggyllama/llama-7b
+query_encoder: facebook/contriever # facebook/contriever , facebook/dpr-question_encoder-single-nq-base
+lm_model: meta-llama/Meta-Llama-3-8B-Instruct
+quantized: True
+model_parallelism: False
+# gpt2, google/flan-t5-large, huggyllama/llama-7b, meta-llama/Meta-Llama-3-8B-Instruct
 ## training
-loss_type: "ce" # kl_div, ce
-model_parallelism: True
-max_round: 2
+loss_type: "kl_div" # kl_div, ce
+max_round: 1
 k: 3
 per_device_train_batch_size: 5
-train_llm_batch_size: 10
-per_device_eval_batch_size: 10
-eval_llm_batch_size: 20
+per_device_eval_batch_size: 60
+train_llm_batch_size: 5
+eval_llm_batch_size: 60
 max_train_epochs: 1
-num_exemplars: 3
+num_exemplars: 1
 # debug: set num_worker=0, pin_memory=False
 temperature: 0.1
 num_workers: 4
@@ -43,5 +45,5 @@ lr: 2.0e-5
 warmup_steps: 0.1
 seed: 19980406
 gradient_accumulation_steps: 1
-val_check_interval: 0.2
+val_check_interval: 0.5
 max_tokens_to_generate: 10
