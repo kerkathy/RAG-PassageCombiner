@@ -6,6 +6,7 @@ import types
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
 os.environ["CUDA_LAUNCH_BLOCKING"]="1" ## for debugging
+import gc
 
 ## third-party
 from accelerate import Accelerator
@@ -38,7 +39,7 @@ from utils import (
     text_has_answer,
 )
 
-debug = False # set log mode to debug, and stop wandb logging
+debug = True # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -47,8 +48,7 @@ logger = get_logger(__name__)
 
 def parse_args():
     # # When using ipynb
-    # # config_file = 'config/llama_train_dpr_nq.yaml'
-    # config_file = 'config/48G_train_dpr_nq.yaml'
+    # config_file = 'config/24G_train_dpr_nq.yaml'
     # yaml_config = get_yaml_file(config_file)
     # args_dict = {}
     # args_dict['config_file'] = config_file
@@ -70,9 +70,9 @@ def parse_args():
 #     return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
 
 def calculate_KL_div_loss(
-    input_logits, # [n_question,n_comb]
-    target_logits, # [n_question,n_comb]
-    temperature,
+    input_logits, # size [n_question,n_comb]
+    target_logits, # size [n_question,n_comb]
+    temperature, # [ret_temperature,lm_temperature]
 ):
     """
     Calculate KL divergence loss between input and target logits
@@ -83,15 +83,15 @@ def calculate_KL_div_loss(
     # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     loss = kl_loss(
-        F.log_softmax(input_logits / temperature, dim=1), # input should be a distribution in the log space
-        F.softmax(target_logits / temperature, dim=1),
+        F.log_softmax(input_logits / temperature[0], dim=1), # input should be a distribution in the log space
+        F.softmax(target_logits / temperature[1], dim=1),
     )
     return loss
 
 def calculate_cross_entropy_loss(
     input_logits, # [n_question,n_comb]
     target_logits, # [n_question,n_comb]
-    temperature,
+    temperature, # [ret_temperature,lm_temperature]
 ):
     """
     Calculate cross entropy loss between input and target logits
@@ -100,8 +100,8 @@ def calculate_cross_entropy_loss(
     global logger
     # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
     # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
-    ce_loss = nn.CrossEntropyLoss()
-    input_logits = input_logits / temperature
+    ce_loss = nn.CrossEntropyLoss() # reduction is mean by default
+    input_logits = input_logits / temperature[0]
     loss = ce_loss(
         input=input_logits, # input is expected to contain the unnormalized logits for each class
         target=torch.argmax(target_logits, dim=1),
@@ -165,7 +165,7 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
     # logger.debug(f"After getitem, data size: {len(data)}")
     return data  # List of tuples
 
-
+# %%
 def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode="train"):
     """
     samples: List[List[tuple]]
@@ -188,6 +188,8 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
         # num_docs=len([doc for doc in x[1] if doc != ""]),
         num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
     answer = [x[2] for x in samples]
+    # debug
+    # print(f"Real answer: {answer}")
     num_has_answer = 0
     for a, p in zip(answer, prompt):
         # logger.debug(f"Answer: {a}")
@@ -214,9 +216,13 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
             max_length = 1024
         else:
             max_length = 256
+        
+        # add_special_tokens=False is really important as it affects probability A LOT!
+        # those bos, eos are already added in make_prompt for llama3
         prompt_ans_lm_inputs = lm_tokenizer(
             prompt, answer, max_length=max_length, padding=True, truncation=True, 
-            return_tensors='pt', return_token_type_ids=True
+            return_tensors='pt', return_token_type_ids=True,
+            add_special_tokens=False if "Llama-3" in lm_name else True,
         )
     
     # update max token length
@@ -233,7 +239,6 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
             "num_has_answer": num_has_answer, # int
             "prompt_strs": prompt, # list[str]
         }
-
     return {
         "query_inputs": query_inputs, # dict
         "doc_embeddings": doc_embeddings, # tensor, [bs,n_dim]
@@ -260,10 +265,10 @@ def validate(
     total_too_long = 0
     total_has_answer = 0
     total_num_correct_pick = 0
-    total_retrievers_pick_lm_prob = 0
 
     # %%
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
+        # %%
         # make raw_batch into a extened batch
         # by first extend each item and then collate_fn
         with torch.no_grad():
@@ -290,9 +295,7 @@ def validate(
             query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
                 if "dpr" in args.query_encoder \
                 else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:] # [bs,n_dim]
-            doc_embedding = batch["doc_embeddings"] # 
-            
-            # logger.debug(f"query_embedding device: {query_embedding.device}; doc_embedding device: {doc_embedding.device}")
+            doc_embedding = batch["doc_embeddings"]
             logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
             single_device_query_num, _ = query_embedding.shape
@@ -321,10 +324,11 @@ def validate(
             query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
             del query_embedding, doc_embedding
             torch.cuda.empty_cache()
+            gc.collect()
             logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
-        # %%
-            if "flan" in args.lm_model:
+            # %%
+            if "t5" in args.lm_model:
                 lm_prob = get_t5_lm_prob(
                     **batch['prompt_ans_lm_inputs'],
                     model=language_model,
@@ -346,14 +350,15 @@ def validate(
                     num_orig_question=num_orig_question,
                     llm_batch_size=args.eval_llm_batch_size,
                     logger=logger,
+                    # tokenizer=lm_tokenizer, # for debugging only
                 )
             logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
             if args.loss_type == "kl_div":
-                loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
             else:
-                loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
-            total_loss += loss.item() * len(batch['query_inputs']['input_ids'])
+                loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
+            total_loss += loss.item()
             logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
@@ -362,29 +367,49 @@ def validate(
             # note. retriever_cossim and lm_prob are both [n_question,n_comb]
             retrievers_pick = torch.argmax(retriever_cossim,dim=1) # [n_question]
 
-            # ### debug
-            # print(f"retriever_cossim: {retriever_cossim}")
-            # print(f"softmax retriever score: {F.softmax(retriever_cossim / temperature,dim=1)}")
-            # print(f"lm_prob: {lm_prob}")
-            # print(f"softmax lm score: {F.softmax(lm_prob / temperature / temperature, dim=1)}")
-            # print(f"retrievers_pick: {retrievers_pick}")
-            # print(f"lm score each question max: {lm_prob[torch.arange(num_orig_question),torch.argmax(lm_prob,dim=1)]}")
+            # # %%
+            # # ### debug
+            print(f"retriever_cossim: {retriever_cossim}")
+            print(f"softmax retriever score: {F.softmax(retriever_cossim / args.ret_temperature,dim=1)}")
+            
+            # print(f"lm_prob.shape: {lm_prob.shape}")
+            # debug_prompt_ans_lm_inputs = batch['prompt_ans_lm_inputs']['input_ids'].view(num_orig_question, -1, batch['prompt_ans_lm_inputs']['input_ids'].shape[-1])
+            # debug_prompt_ans_lm_token_type_ids = batch['prompt_ans_lm_inputs']['token_type_ids'].view(num_orig_question, -1, batch['prompt_ans_lm_inputs']['token_type_ids'].shape[-1])
+            # for i in range(num_orig_question):
+            #     print(f"softmax retriever score: {F.softmax(retriever_cossim[i] / 0.1, dim=0)}")
+            #     print(f"retriever_pick: {retrievers_pick[i]}")
+            #     print(f"orig lm prob: {lm_prob[i]}")
+            #     print(f"softmax lm prob: {F.softmax(lm_prob[i] / 0.1, dim=0)}")
+            #     print(f"token_type_ids: {debug_prompt_ans_lm_token_type_ids[i]}")
+            #     # decode each batch['prompt_ans_lm_inputs']
+            #     batch_decode_result = lm_tokenizer.batch_decode(debug_prompt_ans_lm_inputs[i], skip_special_tokens=True)
+            #     for j, decode_result in enumerate(batch_decode_result):
+            #         print(f"{j}th decoded: {decode_result}")
+            print(f"lm_prob: {lm_prob}")
+            print(f"softmax lm score: {F.softmax(lm_prob / args.lm_temperature,dim=1)}")
+
+            # # print(f"retrievers_pick: {retrievers_pick}")
+            # print(f"retrievers_pick.shape: {retrievers_pick.shape}")
+            # # decode each batch['prompt_ans_lm_inputs']
+            print(f"lm score each question max: {lm_prob[torch.arange(num_orig_question),torch.argmax(lm_prob,dim=1)]}")
             # print(f"retrievers pick lm score: {lm_prob[torch.arange(num_orig_question),retrievers_pick]}")
-            # ### debug
+            # # ### debug
+            # %%
 
             total_num_correct_pick += (retrievers_pick == torch.argmax(lm_prob,dim=1)).sum().item()
             lm_prob = lm_prob[torch.arange(num_orig_question),retrievers_pick] # [n_question]
-            # total_ans_prob += lm_prob.exp().sum().item() 
             total_ans_prob += lm_prob.sum().item() 
             # count how many retriever's pick is the same as lm's pick
             all_retriever_pick.extend(retrievers_pick.tolist())
             retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
             del retriever_cossim, lm_prob
             torch.cuda.empty_cache()
+            gc.collect()
             logger.info(f"[Emptied scoring cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             # ## Metric 3. Exact match
             for k,v in batch['prompt_ans_lm_inputs'].items():
+                logger.debug(f"{k}: {v.shape}")
                 v = v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick]
 
             # %%
@@ -405,7 +430,6 @@ def validate(
             total_too_long += batch_result["too_long"]
             all_predictions.extend(batch_result["predictions"])
 
-            # num_batches += 1
             total_has_answer += batch["num_has_answer"]
 
     # %%
@@ -418,13 +442,12 @@ def validate(
             f.write(item + "\n")
 
     final_result = {
-        "avg_loss": total_loss / total_num_examples, 
+        "avg_loss": total_loss / len(dev_dataloader), # 這裡原本算錯啦! 應該以 batch 為單位才對
         "avg_prob": total_ans_prob / total_num_examples, # 這裡原本算錯啦! 原本是每個 batch 的 mean 加起來再除以 num_batches
         "exact_match (%)": total_num_correct / total_num_examples * 100,
         "too_long (%)": total_too_long / total_num_examples * 100,
         "has_answer (%)": total_has_answer / total_num_examples * 100,
         "retriever_pick_acc (%)": total_num_correct_pick / total_num_examples * 100,
-        "retriever_pick_lm_prob": total_retrievers_pick_lm_prob / total_num_examples,
     }
     logger.info(f"Done {train_step_logdir.split('/')[-1]} step validation.")
     for k,v in final_result.items():
@@ -481,7 +504,7 @@ def main():
                 f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
                 f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
-                f"temp: {args.temperature}","newline_format_prompt", "train", 
+                f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
                 "cossim_ret_score (correct)"
             ]
         else:
@@ -515,8 +538,9 @@ def main():
     model_max_length = lm_config.n_positions if hasattr(lm_config, "n_positions") else lm_config.max_position_embeddings
     # only pad if model is gpt2
     if "gpt2" in args.lm_model or "llama" in args.lm_model:
-        lm_tokenizer.pad_token = "[PAD]"
-        lm_tokenizer.padding_side = "right" # TODO in llama1, should pad left??
+        lm_tokenizer.pad_token = lm_tokenizer.eos_token
+        # lm_tokenizer.pad_token = "[PAD]"
+        lm_tokenizer.padding_side = "left" # TODO in llama1, should pad left??
     logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     if args.data_size == "debug":
@@ -581,6 +605,7 @@ def main():
         doc_encoder = doc_encoder.to("cpu")
         del doc_encoder
         torch.cuda.empty_cache()
+        gc.collect()
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     # take the [args.num_exemplars:] 
@@ -652,7 +677,6 @@ def main():
     completed_steps = 0
 
     # %%
-    # TODO: debug
     if args.resume_training:
         logger.info(f"...Loading old state_dict from ckpt {args.resume_path}...")
         state_dict = torch.load(args.resume_path)
@@ -756,6 +780,7 @@ def main():
                     query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
                     del query_embedding, doc_embedding
                     torch.cuda.empty_cache()
+                    gc.collect()
                     logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     # very likely to OOM error here
@@ -784,11 +809,6 @@ def main():
                         )
                     logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
                     
-                    # move retriever_cossim back to GPU
-                    # retriever_cossim = retriever_cossim.to(accelerator.device)
-                    # logger.debug(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-                    # logger.debug(f"retriever_cossim.device: {retriever_cossim.device}; lm_prob.device: {lm_prob.device}")
-
                     # # try to fix RuntimeError: Found dtype Float but expected Half
                     # for param in query_encoder.parameters():
                     #     # Check if parameter dtype is  Float (float32)
@@ -799,14 +819,15 @@ def main():
                     lm_prob = lm_prob.half()
 
                     if args.loss_type == "kl_div":
-                        loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                        loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     else:
-                        loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=args.temperature)
+                        loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
                     del retriever_cossim, lm_prob
                     torch.cuda.empty_cache()
+                    gc.collect()
 
                 # fix llama error
                 # RuntimeError: Found dtype Float but expected Half
@@ -842,20 +863,20 @@ def main():
                             if eval_result["exact_match (%)"] > best_em:
                                 best_em = eval_result["exact_match (%)"]
 
-                                # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
-                                ckpt_path = os.path.join(CKPT_DIR, f"checkpoint-{completed_steps}.pt")
-                                ensure_directory_exists_for_file(ckpt_path)
-                                # unwrap the model from DDP
-                                unwrapped_model = accelerator.unwrap_model(query_encoder)
-                                unwrapped_optimizer = accelerator.unwrap_model(optimizer)
-                                torch.save({
-                                    'query_encoder': unwrapped_model.state_dict(),
-                                    'optimizer': unwrapped_optimizer.state_dict(),
-                                    'lr_scheduler': lr_scheduler.state_dict(),
-                                    'completed_steps': completed_steps,}, ckpt_path)
-                                # query_encoder.save_pretrained(query_encoder_path)
-                                # query_tokenizer.save_pretrained(query_encoder_path)
-                                logger.info(f"Checkpoint saved to {ckpt_path}")
+                            # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
+                            ckpt_path = os.path.join(CKPT_DIR, f"checkpoint-{completed_steps}.pt")
+                            ensure_directory_exists_for_file(ckpt_path)
+                            # unwrap the model from DDP
+                            unwrapped_model = accelerator.unwrap_model(query_encoder)
+                            unwrapped_optimizer = accelerator.unwrap_model(optimizer)
+                            torch.save({
+                                'query_encoder': unwrapped_model.state_dict(),
+                                'optimizer': unwrapped_optimizer.state_dict(),
+                                'lr_scheduler': lr_scheduler.state_dict(),
+                                'completed_steps': completed_steps,}, ckpt_path)
+                            # query_encoder.save_pretrained(query_encoder_path)
+                            # query_tokenizer.save_pretrained(query_encoder_path)
+                            logger.info(f"Checkpoint saved to {ckpt_path}")
                             
                         accelerator.wait_for_everyone()
                 
@@ -864,6 +885,7 @@ def main():
                 logger.info(f"[Finish step {step} in epoch {epoch} (globally {completed_steps})] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
     
     if accelerator.is_local_main_process:
+        logger.info(f"max_ret_token_len: {max_ret_token_len}; max_lm_token_len: {max_lm_token_len}")
         logger.info(f"Time spent: {time.time() - start_time} seconds")
         logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
         logger.info("...!!Congrats!! Training finished :) ...")

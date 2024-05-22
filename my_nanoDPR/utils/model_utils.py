@@ -90,7 +90,7 @@ def load_lm_model_and_tokenizer(model_name, device=None, quantized=False, model_
     elif not model_parallelism:
         from transformers import BitsAndBytesConfig
         quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", cache_dir="./cache", quantization_config=quantization_config)
+        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", cache_dir=cache_dir, quantization_config=quantization_config)
 
     elif model_parallelism:
         raise NotImplementedError("model_parallelism and quantized cannot be used together (for now)")

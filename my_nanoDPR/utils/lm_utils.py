@@ -170,29 +170,26 @@ def get_lm_prob(
     all_outputs[token_type_ids == 0] = 0 # [ext_batch_size, seq_len]
 
     # compute sequence scores
-    # option 1. sum of log probabilities
-    # all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1) # exp or not...?
-    # option 2. joint probability
     all_outputs = all_outputs.sum(dim=-1).view(num_orig_question, -1).exp() # [num_orig_question, n_comb]
 
     return all_outputs # [num_orig_question, n_comb]
 
-# %%
-def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
-    """
-    For evaluation. Given a batch of model outputs, return the answer strings
-    """
-    answers = []
-    for i, generation_str in enumerate(generation_strs):
-        # print(f"{i}th uncut generation_str: {generation_str}")
-        # fix!!! 好像有差一點 10 token (max_gen_token?)
-        # fix!! 因為 pad 左側所以會有問題
-        generation_str = generation_str[prompt_lengths[i]:]
-        answer = generation_str.split("\n")[0]
-        answers.append(answer)
-        print(f"{i}th cutted generation_str: {generation_str}; answer: {answer}")
-    return answers
-# %%
+# # %%
+# def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
+#     """
+#     For evaluation. Given a batch of model outputs, return the answer strings
+#     """
+#     answers = []
+#     for i, generation_str in enumerate(generation_strs):
+#         # print(f"{i}th uncut generation_str: {generation_str}")
+#         # fix!!! 好像有差一點 10 token (max_gen_token?)
+#         # fix!! 因為 pad 左側所以會有問題
+#         generation_str = generation_str[prompt_lengths[i]:]
+#         answer = generation_str.split("\n")[0]
+#         answers.append(answer)
+#         # print(f"{i}th cutted generation_str: {generation_str}; answer: {answer}")
+#     return answers
+# # %%
 
 
 def lm_gen_and_check(
@@ -205,39 +202,36 @@ def lm_gen_and_check(
     
     if "llama" in tokenizer.name_or_path:
         # %%
-        # i = 0 # debug
-        # constraint the length of the prompt
         answers = []
         # each iteration takes llm_batch_size examples using index
         for i, prompt_str in tqdm(enumerate(prompt_strs), desc="Generating", total=len(prompt_strs)):
             prompt_input_ids = tokenizer(prompt_str, return_tensors="pt").input_ids.to(device)
 
+            # constraint the length of the prompt
             if prompt_input_ids.shape[-1] > max_length - max_tokens_to_generate:
                 num_too_long += 1
                 prompt_input_ids = prompt_input_ids[..., -(max_length - max_tokens_to_generate):]
 
             with torch.no_grad():
                 if "llama-3" in tokenizer.name_or_path.lower():
+                    model.generation_config.temperature=None
+                    model.generation_config.top_p=None
                     output = model.generate(
                         prompt_input_ids, 
                         max_new_tokens=max_tokens_to_generate, 
                         pad_token_id=tokenizer.eos_token_id, 
                         eos_token_id=[tokenizer.eos_token_id,tokenizer.convert_tokens_to_ids("<|eot_id|>")],
+                        do_sample=False, # for reproducibility
+                        temperature=None, # override generation_config
+                        top_p=None,
                     )
                 else:
                     output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
-
-            # decode one by one
             generation_str = tokenizer.decode(output[0][prompt_input_ids.shape[-1]:], skip_special_tokens=True)
             all_predictions.append(generation_str)
-            # get answers from prompt_ans_lm_inputss where token_type_ids == 1
+            # get answers from prompt_ans_lm_inputs where token_type_ids == 1
             truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
             answers.append(truth)
-
-            # debug
-            # print(f"Prediction: {generation_str}")
-            # print(f"True Answer: {truth}")
-            # i += 1
             
     # %%
     else:
@@ -249,10 +243,10 @@ def lm_gen_and_check(
             with torch.no_grad():
                 # add support to accelerator unwrap
                 if hasattr(model, "module"):
-                    output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate, do_sample=False)
                     logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                 else:
-                    output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate)
+                    output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate, do_sample=False)
                     logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)

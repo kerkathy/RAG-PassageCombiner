@@ -58,11 +58,8 @@ chat_prompt_template = """<|begin_of_text|><|start_header_id|>system<|end_header
 {USER_PROMPT}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
-# terminators = [
-#     tokenizer.eos_token_id,
-#     tokenizer.convert_tokens_to_ids("<|eot_id|>")
-# ]
 
+# https://huggingface.co/blog/not-lain/rag-chatbot-using-llama3
 llama3_sys_prompt_no_doc = """You are an assistant for directly answering questions in a compact way.
 Provide a very short answer that contains only necessary entities.
 For example:
@@ -79,10 +76,11 @@ def format_llama3_user_prompt(question,retrieved_documents,k):
     """using the retrieved documents we will prompt the model to generate our responses"""
     USER_PROMPT = f"Question:{question}\n"
     if retrieved_documents == []:
-        return USER_PROMPT
+        return USER_PROMPT + "Answer:"
     USER_PROMPT+= "Context:"
     for idx in range(k) :
         USER_PROMPT+= f"{retrieved_documents[idx]}\n"
+    USER_PROMPT+= "Answer:"
     return USER_PROMPT
 
 
