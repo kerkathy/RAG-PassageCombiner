@@ -369,8 +369,8 @@ def validate(
 
             # # %%
             # # ### debug
-            print(f"retriever_cossim: {retriever_cossim}")
-            print(f"softmax retriever score: {F.softmax(retriever_cossim / args.ret_temperature,dim=1)}")
+            # print(f"retriever_cossim: {retriever_cossim}")
+            # print(f"softmax retriever score: {F.softmax(retriever_cossim / args.ret_temperature,dim=1)}")
             
             # print(f"lm_prob.shape: {lm_prob.shape}")
             # debug_prompt_ans_lm_inputs = batch['prompt_ans_lm_inputs']['input_ids'].view(num_orig_question, -1, batch['prompt_ans_lm_inputs']['input_ids'].shape[-1])
@@ -385,17 +385,16 @@ def validate(
             #     batch_decode_result = lm_tokenizer.batch_decode(debug_prompt_ans_lm_inputs[i], skip_special_tokens=True)
             #     for j, decode_result in enumerate(batch_decode_result):
             #         print(f"{j}th decoded: {decode_result}")
-            print(f"lm_prob: {lm_prob}")
-            print(f"softmax lm score: {F.softmax(lm_prob / args.lm_temperature,dim=1)}")
+            # print(f"lm_prob: {lm_prob}")
+            # print(f"softmax lm score: {F.softmax(lm_prob / args.lm_temperature,dim=1)}")
 
             # # print(f"retrievers_pick: {retrievers_pick}")
             # print(f"retrievers_pick.shape: {retrievers_pick.shape}")
             # # decode each batch['prompt_ans_lm_inputs']
-            print(f"lm score each question max: {lm_prob[torch.arange(num_orig_question),torch.argmax(lm_prob,dim=1)]}")
+            # print(f"lm score each question max: {lm_prob[torch.arange(num_orig_question),torch.argmax(lm_prob,dim=1)]}")
             # print(f"retrievers pick lm score: {lm_prob[torch.arange(num_orig_question),retrievers_pick]}")
             # # ### debug
             # %%
-
             total_num_correct_pick += (retrievers_pick == torch.argmax(lm_prob,dim=1)).sum().item()
             lm_prob = lm_prob[torch.arange(num_orig_question),retrievers_pick] # [n_question]
             total_ans_prob += lm_prob.sum().item() 
@@ -465,7 +464,7 @@ def main():
         # device_placement='cpu' if debug else 'auto',  # Change this line
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         log_with=None if debug else 'wandb',  # Change this line
-        mixed_precision='no',
+        mixed_precision='bf16', # turn on bf16
         kwargs_handlers=[kwargs]
     )
     logger.debug("*** IN DEBUG MODE ***")
@@ -490,7 +489,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep"}}
+                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep {args.encoder_type}"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -744,7 +743,7 @@ def main():
 
             query_encoder.train()
             with accelerator.accumulate(query_encoder): # gradient accumulation
-                with accelerator.autocast():
+                with accelerator.autocast(): # mixed precision
                     # logger.debug(f"batch['query_inputs']['input_ids']: {batch['query_inputs']['input_ids'].shape}")
                     # logger.debug(f"batch['doc_embeddings']: {batch['doc_embeddings'].shape}")
                     query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
@@ -815,8 +814,8 @@ def main():
                     #     if param.dtype == torch.float32:
                     #         param.data = param.data.to(torch.float16)
                     # try to fix RuntimeError: Found dtype Float but expected Half
-                    retriever_cossim = retriever_cossim.half()
-                    lm_prob = lm_prob.half()
+                    retriever_cossim = retriever_cossim
+                    lm_prob = lm_prob
 
                     if args.loss_type == "kl_div":
                         loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
@@ -829,8 +828,6 @@ def main():
                     torch.cuda.empty_cache()
                     gc.collect()
 
-                # fix llama error
-                # RuntimeError: Found dtype Float but expected Half
                 accelerator.backward(loss)
                 logger.info(f"[After backward] loss = {loss}; GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
