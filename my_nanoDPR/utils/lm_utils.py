@@ -193,8 +193,9 @@ def get_lm_prob(
 
 
 def lm_gen_and_check(
-        model, tokenizer, device, max_length, prompt_ans_lm_inputs, prompt_strs,
-        accelerator, max_tokens_to_generate=10, llm_batch_size=1, logger=None
+        model, tokenizer, device, accelerator, 
+        max_length, prompt_ans_lm_inputs, full_answers, all_qid, prompt_strs,
+        max_tokens_to_generate=10, llm_batch_size=1, logger=None
 ):
     # %%
     num_too_long = 0
@@ -202,7 +203,7 @@ def lm_gen_and_check(
     
     if "llama" in tokenizer.name_or_path:
         # %%
-        answers = []
+        # answers = []
         # each iteration takes llm_batch_size examples using index
         for i, prompt_str in tqdm(enumerate(prompt_strs), desc="Generating", total=len(prompt_strs)):
             prompt_input_ids = tokenizer(prompt_str, return_tensors="pt").input_ids.to(device)
@@ -229,14 +230,14 @@ def lm_gen_and_check(
                     output = model.generate(prompt_input_ids, max_new_tokens=max_tokens_to_generate)
             generation_str = tokenizer.decode(output[0][prompt_input_ids.shape[-1]:], skip_special_tokens=True)
             all_predictions.append(generation_str)
-            # get answers from prompt_ans_lm_inputs where token_type_ids == 1
-            truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
-            answers.append(truth)
+            # # get answers from prompt_ans_lm_inputs where token_type_ids == 1
+            # truth = tokenizer.decode(prompt_ans_lm_inputs["input_ids"][i][prompt_ans_lm_inputs["token_type_ids"][i] == 1], skip_special_tokens=True)
+            # answers.append(truth)
             
     # %%
     else:
         # t5 generation has no constraint on the length
-        answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
+        # answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
         # all_prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
         all_prompt_input_ids = prompt_ans_lm_inputs["input_ids"].to(device)
         for input_ids_batch in all_prompt_input_ids.split(llm_batch_size):
@@ -253,12 +254,13 @@ def lm_gen_and_check(
 
     # %%
     num_correct = 0
-    for prediction, answer in zip(all_predictions, answers):
-        is_correct = exact_match(prediction, answer) # now we only have one ans per example
-        # is_correct = any([exact_match(prediction, answer) for answer in answers])
+    for prediction, qid in zip(all_predictions, all_qid):
+        answers = full_answers[qid]
+        is_correct = any([exact_match(prediction, answer) for answer in answers])
+        # is_correct = exact_match(prediction, answer) # now we only have one ans per example
         if is_correct:
             num_correct += 1
 
-    result = {"num_correct": num_correct, "num_examples": len(answers), "too_long": num_too_long, "predictions": [normalize_answer(prediction) for prediction in all_predictions]}
+    result = {"num_correct": num_correct, "num_examples": len(all_predictions), "too_long": num_too_long, "predictions": [normalize_answer(prediction) for prediction in all_predictions]}
     # %%
     return result

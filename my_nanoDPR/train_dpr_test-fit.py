@@ -1,4 +1,9 @@
 # %%
+"""
+In this file, a part of training data is used for evaluation, 
+to test the model's fitness.
+"""
+
 ## built-in
 import time,random,queue,sys
 import math,logging,json,random,os,psutil
@@ -82,6 +87,8 @@ def calculate_KL_div_loss(
     # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
     # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
+    # [experiment-1] minus loss
+    # print("--- Doing experiment-1: minus loss ---")
     loss = kl_loss(
         F.log_softmax(input_logits / temperature[0], dim=1), # input should be a distribution in the log space
         F.softmax(target_logits / temperature[1], dim=1),
@@ -99,9 +106,11 @@ def calculate_cross_entropy_loss(
     """
     global logger
     # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
+    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")D
     ce_loss = nn.CrossEntropyLoss() # reduction is mean by default
     input_logits = input_logits / temperature[0]
+    # [experiment-1] minus loss
+    # print("--- Doing experiment-1: minus loss ---")
     loss = ce_loss(
         input=input_logits, # input is expected to contain the unnormalized logits for each class
         target=torch.argmax(target_logits, dim=1),
@@ -122,6 +131,9 @@ class QADataset(torch.utils.data.Dataset):
         qid = data[0][-1]
         corpus = self.all_corpus[qid]
         doc_embeddings = self.all_doc_embeddings[qid]  # Move to correct device
+        # debug
+        # print(f"{idx}th data len(corpus): {len(corpus)}")
+        # print(f"{idx}th data doc_embeddings.shape: {doc_embeddings.shape}")
         return {"data": data, "corpus": corpus, "doc_embeddings": doc_embeddings}
     
     def collate_fn(self, samples):
@@ -499,13 +511,19 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.data_size}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep {args.encoder_type}"}}
+                f"(test-fit) ({args.data_size}) (lr {args.lr}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
-        CKPT_DIR = os.path.join(args.ckpt_dir, wandb_tracker.run.id)
+        CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
+        # if this dir already exist, exit successfully
+        if os.path.exists(CKPT_DIR):
+            logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
+            return
+        os.makedirs(CKPT_DIR)
+        logger.info(f"Logging to {LOG_DIR}, create CKPT_DIR {CKPT_DIR}...")
         wandb_tracker.run.log_code(".")
         if not args.resume_training:
             wandb_tracker.run.tags = [
@@ -528,7 +546,7 @@ def main():
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
         CKPT_DIR = "./tmp_ckpt"
-    ensure_directory_exists_for_file(CKPT_DIR)
+    
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
 
@@ -568,7 +586,8 @@ def main():
     logger.info("...Loading data...")
     # skip data used as exemplars
     train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))
-    dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
+    dev_data = train_data[:dev_size]
+    # dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
 
@@ -579,14 +598,17 @@ def main():
     logger.info(f"Size of dev corpus: {len(dev_corpus)}")
 
     train_index_path = os.path.join(args.index_dir, f"train_{train_size}.pt")
-    dev_index_path = os.path.join(args.index_dir, f"dev_{dev_size}.pt")
+    # dev_index_path = os.path.join(args.index_dir, f"dev_{dev_size}.pt")
     empty_doc_embedding_path = os.path.join(args.index_dir, "empty_doc.pt")
 
-    if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
-        logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 
+    if os.path.exists(train_index_path) and os.path.exists(empty_doc_embedding_path):
+    # if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
+        # logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 
+        logger.info(f"...Loading index from {train_index_path}...")
         # skip those exemplars
         train_doc_embeddings = torch.load(train_index_path)
-        dev_doc_embeddings = torch.load(dev_index_path)
+        dev_doc_embeddings = train_doc_embeddings[:dev_size]
+        # dev_doc_embeddings = torch.load(dev_index_path)
         empty_doc_embedding = torch.load(empty_doc_embedding_path)
         assert len(train_doc_embeddings) == len(train_corpus), f"len(train_doc_embeddings) ({len(train_doc_embeddings)}) != len(train_corpus), ({len(train_corpus)})"
         assert len(dev_doc_embeddings) == len(dev_corpus), f"len(dev_doc_embeddings) ({len(dev_doc_embeddings)}) != len(dev_corpus), ({len(dev_corpus)})"
@@ -600,15 +622,16 @@ def main():
             if not os.path.exists(train_index_path):
                 logger.info(f"...Creating train index with size {len(train_corpus)}...")
                 train_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
+                dev_doc_embeddings = train_doc_embeddings[:dev_size]
                 torch.save(train_doc_embeddings, train_index_path)
             else:
                 logger.info(f"...Loading train index from {train_index_path}...")
                 train_doc_embeddings = torch.load(train_index_path)
                 dev_doc_embeddings = train_doc_embeddings[:dev_size]
-            if not os.path.exists(dev_index_path):
-                logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
-                dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
-                torch.save(dev_doc_embeddings, dev_index_path)
+            # if not os.path.exists(dev_index_path):
+            #     logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
+            #     dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
+            #     torch.save(dev_doc_embeddings, dev_index_path)
             if not os.path.exists(empty_doc_embedding_path):
                 logger.info(f"...Creating empty embedding ...")
                 empty_doc_embedding = make_index(["[UNK]"], doc_tokenizer, doc_encoder).squeeze() # for empty document
@@ -616,7 +639,8 @@ def main():
             else:
                 logger.info(f"...Loading empty embedding ...")
                 empty_doc_embedding = torch.load(empty_doc_embedding_path)
-        logger.info(f"Index saved to {train_index_path}, {dev_index_path}, {empty_doc_embedding_path}")
+        logger.info(f"Index saved to {train_index_path},{empty_doc_embedding_path}")
+        # logger.info(f"Index saved to {train_index_path}, {dev_index_path}, {empty_doc_embedding_path}")
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
         logger.info("...Deleting doc_encoder...")
@@ -633,6 +657,12 @@ def main():
     dev_corpus = dev_corpus[args.num_exemplars:]
     train_doc_embeddings = train_doc_embeddings[args.num_exemplars:]
     dev_doc_embeddings = dev_doc_embeddings[args.num_exemplars:]
+    # [experiment-2] take only 10 documents per question
+    print(f"--- Doing experiment-2: take only 10 documents per question ---")
+    train_corpus = [x[:10] for x in train_corpus]
+    dev_corpus = [x[:10] for x in dev_corpus]
+    train_doc_embeddings = [x[:10] for x in train_doc_embeddings]
+    dev_doc_embeddings = [x[:10] for x in dev_doc_embeddings]
 
     # # %%
     # gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
@@ -732,6 +762,7 @@ def main():
     # %%
         eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir, dev_full_answers)
         accelerator.log({"eval":eval_result}, step=completed_steps)
+    best_em = eval_result["exact_match (%)"]
 
     # %%
     logger.info("\n***** Running training *****")
@@ -753,7 +784,6 @@ def main():
 
     start_time = time.time()
 
-    best_em = eval_result["exact_match (%)"]
 
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
@@ -863,8 +893,8 @@ def main():
                     #     if param.dtype == torch.float32:
                     #         param.data = param.data.to(torch.float16)
                     # try to fix RuntimeError: Found dtype Float but expected Half
-                    retriever_cossim = retriever_cossim
-                    lm_prob = lm_prob
+                    # retriever_cossim = retriever_cossim
+                    # lm_prob = lm_prob
 
                     if args.loss_type == "kl_div":
                         loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])

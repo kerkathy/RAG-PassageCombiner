@@ -1,6 +1,5 @@
 import torch
 import yaml,os
-
 def ensure_directory_exists_for_file(file_path):
     dir_path = os.path.dirname(file_path)
     if not os.path.isdir(dir_path):
@@ -92,11 +91,14 @@ def make_index(corpus, tokenizer, encoder, batch_size=32):
             embeddings_list.extend(embeddings.tolist())
     return torch.tensor(embeddings_list)
 
-def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k):  
+def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k, cache):
     """
     Compute cosine similarity between query and documents in the doc_index
     return top k documents
     """
+    if query in cache:
+        print("Cache hit!")
+        return cache[query]
     query_embedding = get_sentence_embedding(query, tokenizer, query_encoder)  
     # query_embedding, doc_embeddings = query_embedding.to(device), doc_embeddings.to(device)
     # query_embedding, doc_embeddings = accelerator.prepare(query_embedding), accelerator.prepare(doc_embeddings) # this line cause error: device mismatch with one on cpu and one on cuda
@@ -106,6 +108,6 @@ def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k):
     scores = torch.nn.functional.cosine_similarity(query_embedding, doc_embeddings, dim=1)
     top_doc_scores, top_doc_indices = torch.topk(scores, k)
     top_doc_indices = top_doc_indices.flatten().tolist()
-    # print(f"Finish retrieve_top_k_docid.\nGPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+    cache[query] = top_doc_indices
 
     return top_doc_indices
