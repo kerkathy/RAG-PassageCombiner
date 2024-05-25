@@ -3,6 +3,7 @@ import string
 import torch
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
+from collections import Counter
 
 def normalize_question(question):
     if not question.endswith("?"):
@@ -26,11 +27,23 @@ def normalize_answer(s):
         return text.lower()
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
-# %%
 
 def exact_match(prediction, ground_truth):
     # TODO 考慮改寬鬆一點
     return normalize_answer(prediction) == normalize_answer(ground_truth)
+
+def f1_score(prediction, ground_truth):
+    # from RAG implementation
+    prediction_tokens = normalize_answer(prediction).split()
+    ground_truth_tokens = normalize_answer(ground_truth).split()
+    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
+        return 0
+    precision = 1.0 * num_same / len(prediction_tokens)
+    recall = 1.0 * num_same / len(ground_truth_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1
 
 def text_has_answer(answers, text) -> bool:
     if isinstance(answers, str):
@@ -174,24 +187,6 @@ def get_lm_prob(
 
     return all_outputs # [num_orig_question, n_comb]
 
-# # %%
-# def get_batch_answer_from_model_output(generation_strs, prompt_lengths):
-#     """
-#     For evaluation. Given a batch of model outputs, return the answer strings
-#     """
-#     answers = []
-#     for i, generation_str in enumerate(generation_strs):
-#         # print(f"{i}th uncut generation_str: {generation_str}")
-#         # fix!!! 好像有差一點 10 token (max_gen_token?)
-#         # fix!! 因為 pad 左側所以會有問題
-#         generation_str = generation_str[prompt_lengths[i]:]
-#         answer = generation_str.split("\n")[0]
-#         answers.append(answer)
-#         # print(f"{i}th cutted generation_str: {generation_str}; answer: {answer}")
-#     return answers
-# # %%
-
-
 def lm_gen_and_check(
         model, tokenizer, device, accelerator, 
         max_length, prompt_ans_lm_inputs, prompt_strs, all_full_answers,
@@ -257,6 +252,7 @@ def lm_gen_and_check(
 
     # %%
     num_correct = 0
+    sum_f1 = 0
     # i = 0
     for prediction, full_answers in zip(all_predictions, all_full_answers):
         # # debug: print prediction and answer
@@ -267,12 +263,20 @@ def lm_gen_and_check(
         is_correct = any([exact_match(prediction, answer) for answer in full_answers])
         if is_correct:
             num_correct += 1
+        sum_f1 += max([f1_score(prediction, answer) for answer in full_answers])
 
     num_has_answer = 0
     for full_answers, prompt_str in zip(all_full_answers, prompt_strs):
         if text_has_answer(full_answers, prompt_str):
             num_has_answer += 1
 
-    result = {"num_correct": num_correct, "num_has_answer": num_has_answer, "num_examples": len(all_predictions), "too_long": num_too_long, "predictions": [normalize_answer(prediction) for prediction in all_predictions]}
+    result = {
+        "num_correct": num_correct, 
+        "num_has_answer": num_has_answer, 
+        "num_examples": len(all_predictions),
+        "sum_f1": sum_f1,
+        "too_long": num_too_long, 
+        "predictions": [normalize_answer(prediction) for prediction in all_predictions]
+    }
     # %%
     return result

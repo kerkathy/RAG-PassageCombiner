@@ -38,7 +38,7 @@ from utils import (
     make_prompt,
 )
 
-debug = False # set log mode to debug, and stop wandb logging
+debug = True # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -287,6 +287,7 @@ def validate(
     total_too_long = 0
     total_has_answer = 0
     total_num_correct_pick = 0
+    total_f1_score = 0
 
     # %%
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
@@ -481,6 +482,7 @@ def validate(
             total_too_long += batch_result["too_long"]
             all_predictions.extend(batch_result["predictions"])
             total_has_answer += batch_result["num_has_answer"]
+            total_f1_score += batch_result["sum_f1"]
 
     # %%
     # write retriever pick to train_step_logdir
@@ -490,7 +492,6 @@ def validate(
     with open(os.path.join(train_step_logdir, "prediction.json"), "w", encoding='utf-8') as f:
         for item in all_predictions:
             f.write(item + "\n")
-
     final_result = {
         "avg_loss": total_loss / len(dev_dataloader), # 這裡原本算錯啦! 應該以 batch 為單位才對
         "avg_prob": total_ans_prob / total_num_examples, # 這裡原本算錯啦! 原本是每個 batch 的 mean 加起來再除以 num_batches
@@ -498,13 +499,13 @@ def validate(
         "too_long (%)": total_too_long / total_num_examples * 100,
         "has_answer (%)": total_has_answer / total_num_examples * 100, # 這裡原本算錯啦! 原本是所有 comb 的都算 但其實應該只能看選出來的那個
         "retriever_pick_acc (%)": total_num_correct_pick / total_num_examples * 100,
+        "f1_score": total_f1_score / total_num_examples,
     }
     logger.info(f"Done {train_step_logdir.split('/')[-1]} step validation.")
     logger.info(f"total_num_examples: {total_num_examples}")
     for k,v in final_result.items():
         logger.info(f"{k}: {v}")
     return final_result
-
 
 # %%
 def main():
