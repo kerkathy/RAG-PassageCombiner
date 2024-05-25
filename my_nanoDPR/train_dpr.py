@@ -170,7 +170,14 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
 
                 # Increment next_pointer
                 next_round_should_visited += 1
-    # logger.debug(f"After getitem, data size: {len(data)}")
+
+    # debug: temporarily remove empty document
+    if not args.empty_doc:
+        num_data_before_remove = len(data)
+        data = [x for x in data if x[1] != [""]]
+        num_data_after_remove = len(data)
+        assert num_data_before_remove == num_data_after_remove + 1, f"num_data_before_remove ({num_data_before_remove}) != num_data_after_remove + 1 ({num_data_after_remove + 1})"
+
     return data  # List of tuples
 
 # %%
@@ -315,7 +322,8 @@ def validate(
             query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
             doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
-            num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
+            num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
+                else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
             retriever_cossim = retriever_cossim.view(num_orig_question, -1)
             logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
@@ -516,7 +524,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep {args.encoder_type}"}}
+                f"({args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) ({args.empty_doc} empty) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type})"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -604,9 +612,13 @@ def main():
     logger.info(f"Size of train corpus: {len(train_corpus)}")
     logger.info(f"Size of dev corpus: {len(dev_corpus)}")
 
-    train_index_path = os.path.join(args.index_dir, f"train_{train_size}.pt")
-    dev_index_path = os.path.join(args.index_dir, f"dev_{dev_size}.pt")
-    empty_doc_embedding_path = os.path.join(args.index_dir, "empty_doc.pt")
+    index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
+    train_index_path = os.path.join(index_dir, f"train_{train_size}.pt")
+    dev_index_path = os.path.join(index_dir, f"dev_{dev_size}.pt")
+    empty_doc_embedding_path = os.path.join(index_dir, "empty_doc.pt")
+    # train_index_path = os.path.join(args.index_dir, f"train_{train_size}.pt")
+    # dev_index_path = os.path.join(args.index_dir, f"dev_{dev_size}.pt")
+    # empty_doc_embedding_path = os.path.join(args.index_dir, "empty_doc.pt")
 
     if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
         logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 
@@ -831,7 +843,8 @@ def main():
                     query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
                     doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
                     retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
-                    num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
+                    num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
+                        else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
                     retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
                     # logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
