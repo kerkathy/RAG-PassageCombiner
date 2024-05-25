@@ -1,3 +1,7 @@
+log/
+debug_msgs/
+ckpt_kldiv/
+ckpt_ce/
 ckpt/
 tmp_ckpt/
 cache/

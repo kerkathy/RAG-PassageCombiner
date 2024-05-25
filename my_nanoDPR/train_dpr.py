@@ -107,6 +107,21 @@ def calculate_cross_entropy_loss(
     )
     return loss 
 
+def calculate_nll_loss(
+    doc_scores, # [n_question,n_comb]
+    seq_probs, # [n_question,n_comb]
+):
+    """
+    Following RAG paper, calculate negative log likelihood loss
+    prob_y_given_x = doc similarity score * answer probability
+    NLL = -log(prob_y_given_x)
+    """
+    # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
+    doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
+    seq_logprobs = seq_probs.log()
+    nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
+    return nll_loss
+
 class QADataset(torch.utils.data.Dataset):
     def __init__(self, qa_pairs, all_corpus, all_doc_embeddings):
         self.qa_pairs = qa_pairs
@@ -362,6 +377,8 @@ def validate(
             
             if args.loss_type == "kl_div":
                 loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
+            elif args.loss_type == "rag":
+                loss = calculate_nll_loss(doc_scores=retriever_cossim, seq_probs=lm_prob)
             else:
                 loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
             total_loss += loss.item()
@@ -548,6 +565,7 @@ def main():
                 f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
+                f"empty_doc: {args.empty_doc}",
                 "cossim_ret_score (correct)"
             ]
         else:
@@ -588,7 +606,7 @@ def main():
 
     if args.data_size == "debug":
         train_size, dev_size = 50, 10
-    if args.data_size == "debug-fit-1":
+    elif args.data_size == "debug-fit-1":
         train_size, dev_size = 100, 100
     elif args.data_size == "1/10":
         train_size, dev_size = 10000, 1000
@@ -891,6 +909,8 @@ def main():
 
                     if args.loss_type == "kl_div":
                         loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
+                    elif args.loss_type == "rag":
+                        loss = calculate_nll_loss(doc_scores=retriever_cossim, seq_probs=lm_prob)
                     else:
                         loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")

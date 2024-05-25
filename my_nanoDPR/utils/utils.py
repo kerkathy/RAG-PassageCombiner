@@ -95,9 +95,6 @@ def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k):
     Compute cosine similarity between query and documents in the doc_index
     return top k documents
     """
-    # if query in cache:
-    #     print("Cache hit!")
-    #     return cache[query]
     query_embedding = get_sentence_embedding(query, tokenizer, query_encoder)  
     # query_embedding, doc_embeddings = query_embedding.to(device), doc_embeddings.to(device)
     # query_embedding, doc_embeddings = accelerator.prepare(query_embedding), accelerator.prepare(doc_embeddings) # this line cause error: device mismatch with one on cpu and one on cuda
