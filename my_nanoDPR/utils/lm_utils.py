@@ -108,12 +108,12 @@ def get_t5_lm_prob(
         with torch.no_grad():
             # t5 shifts labels to the right by one internally
             logits_batch = model(input_ids=input_ids_batch, labels=labels_batch).logits
-            logger.info(f"[Passed LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Passed LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             eff_batch_size, seq_len, vocab_size = logits_batch.shape
             ce_fn = CrossEntropyLoss(
                 reduction="none", ignore_index=tokenizer.pad_token_id)
             log_probs_batch = -ce_fn(logits_batch.view(-1, vocab_size), labels_batch.view(-1)) # [eff_batch_size * seq_len]
-            logger.info(f"[Loss calced] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Loss calced] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
         log_probs.append(log_probs_batch.view(eff_batch_size, seq_len).sum(dim=-1)) # [eff_batch_size]
         # print("T5 log_probs_batch.shape: ", log_probs[-1].shape)
@@ -154,7 +154,7 @@ def get_lm_prob(
 
         with torch.no_grad():
             outputs_batch = model(input_ids=input_ids_batch, attention_mask=attention_mask_batch).logits # [ext_batch_size, seq_len, vocab_size]
-            logger.info(f"[Passed LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Passed LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             outputs_batch = torch.log_softmax(outputs_batch, dim=-1).detach()
         
         # collect the probability of the generated token
@@ -194,12 +194,13 @@ def get_lm_prob(
 
 def lm_gen_and_check(
         model, tokenizer, device, accelerator, 
-        max_length, prompt_ans_lm_inputs, full_answers, all_qid, prompt_strs,
+        max_length, prompt_ans_lm_inputs, prompt_strs, all_full_answers,
         max_tokens_to_generate=10, llm_batch_size=1, logger=None
 ):
     # %%
     num_too_long = 0
     all_predictions = []
+    # debug
     
     if "llama" in tokenizer.name_or_path:
         # %%
@@ -236,6 +237,7 @@ def lm_gen_and_check(
             
     # %%
     else:
+        prompt_strs = []
         # t5 generation has no constraint on the length
         # answers = tokenizer.batch_decode(prompt_ans_lm_inputs["labels"], skip_special_tokens=True)
         # all_prompt_lengths = (prompt_ans_lm_inputs["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
@@ -245,22 +247,32 @@ def lm_gen_and_check(
                 # add support to accelerator unwrap
                 if hasattr(model, "module"):
                     output_batch = accelerator.unwrap_model(model).generate(input_ids_batch, max_new_tokens=max_tokens_to_generate, do_sample=False)
-                    logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                    # logger.info(f"[Passed DDP LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                 else:
                     output_batch = model.generate(input_ids_batch, max_new_tokens=max_tokens_to_generate, do_sample=False)
-                    logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                    # logger.info(f"[Passed normal LM] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             generation_strs = tokenizer.batch_decode(output_batch.cpu(), skip_special_tokens=True)
             all_predictions.extend(generation_strs)
+        prompt_strs.extend(tokenizer.batch_decode(all_prompt_input_ids, skip_special_tokens=True))
 
     # %%
     num_correct = 0
-    for prediction, qid in zip(all_predictions, all_qid):
-        answers = full_answers[qid]
-        is_correct = any([exact_match(prediction, answer) for answer in answers])
-        # is_correct = exact_match(prediction, answer) # now we only have one ans per example
+    # i = 0
+    for prediction, full_answers in zip(all_predictions, all_full_answers):
+        # # debug: print prediction and answer
+        # print(f"Prompt: {prompt_strs[i]}")
+        # i += 1
+        # print(f"Prediction: {prediction}")
+        # print(f"Answer: {full_answers}")
+        is_correct = any([exact_match(prediction, answer) for answer in full_answers])
         if is_correct:
             num_correct += 1
 
-    result = {"num_correct": num_correct, "num_examples": len(all_predictions), "too_long": num_too_long, "predictions": [normalize_answer(prediction) for prediction in all_predictions]}
+    num_has_answer = 0
+    for full_answers, prompt_str in zip(all_full_answers, prompt_strs):
+        if text_has_answer(full_answers, prompt_str):
+            num_has_answer += 1
+
+    result = {"num_correct": num_correct, "num_has_answer": num_has_answer, "num_examples": len(all_predictions), "too_long": num_too_long, "predictions": [normalize_answer(prediction) for prediction in all_predictions]}
     # %%
     return result

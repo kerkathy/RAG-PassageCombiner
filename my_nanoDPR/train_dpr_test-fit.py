@@ -128,9 +128,8 @@ class QADataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = [self.qa_pairs[idx]]  # each item is (query, all_doc, answer, last_doc_embedding, qid)
-        qid = data[0][-1]
-        corpus = self.all_corpus[qid]
-        doc_embeddings = self.all_doc_embeddings[qid]  # Move to correct device
+        corpus = self.all_corpus[idx]
+        doc_embeddings = self.all_doc_embeddings[idx]  # Move to correct device
         # debug
         # print(f"{idx}th data len(corpus): {len(corpus)}")
         # print(f"{idx}th data doc_embeddings.shape: {doc_embeddings.shape}")
@@ -144,12 +143,11 @@ class QADataset(torch.utils.data.Dataset):
 
 # this is like getitem, moved outside Dataset because we're using GPU here, and using GPU inside Dataset is not recommended
 # def inloop_getitem
-# TODO cache declaration
-def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args, cache):
+def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args):
     """
     Extend each item in data by retrieving top k documents for each round
     into 1 + k + k^2 + ... + k^max_round items
-    data: List[tuple], each tuple is (query, all_doc, answer, last_doc_embedding, qid)
+    data: List[tuple], each tuple is (query, all_doc, answer, last_doc_embedding)
     """
     global logger
     # logger.debug("In inloop_getitem...")
@@ -169,16 +167,17 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
         # Process data from current round
         while cur_visited < this_round_should_visited:
             # Get current data
-            query, doc_list, answer, _, qid = data[cur_visited]
+            query, doc_list, answer, _ = data[cur_visited]
             cur_visited += 1
 
             # Retrieve top k documents
             # logger.debug(f"query: {doc_list[-1] + ' ' + query}")
-            doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k, cache)
+            doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
+            # doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k, cache)
             # Append new data
             for docid in doc_ids:
                 new_doc_list = doc_list + [corpus[docid]]
-                data.append((query, new_doc_list, answer, doc_embeddings[docid].to(embedding_device), qid))
+                data.append((query, new_doc_list, answer, doc_embeddings[docid].to(embedding_device)))
 
                 # Increment next_pointer
                 next_round_should_visited += 1
@@ -196,6 +195,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
     # TODO add feature: 不同文章數量的分開 decode
     # flatten the samples into a list of tuples
     # logger.debug(f"Original batch size: {len(samples)}")
+    num_orig_question = len(samples)
     samples = [item for sublist in samples for item in sublist]
     # logger.debug(f"Real batch size: {len(samples)}")
     
@@ -207,20 +207,16 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
     prompt = [make_prompt(
         question=x[0], documents=x[1], lm_name=lm_name, 
         num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
-    answer = [x[2] for x in samples]
+    answer_to_encode = [x[2][0] for x in samples] # pick the first answer for each question, as eval set may have multiple answers
     # debug
     # print(f"Real answer: {answer}")
-    num_has_answer = 0
-    for a, p in zip(answer, prompt):
-        if text_has_answer(a, p):
-            num_has_answer += 1
 
     if "t5" in lm_name:
         # separate input_ids (send into encoder) and labels (send into decoder)
         # regarding max_length: https://huggingface.co/google/flan-t5-xxl/discussions/41
         # regarding max_length: https://github.com/google-research/FLAN/issues/36
         input_ids = lm_tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048).input_ids
-        labels = lm_tokenizer(answer, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids
+        labels = lm_tokenizer(answer_to_encode, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids
         prompt_ans_lm_inputs = {"input_ids": input_ids, "labels": labels}
     else:
         if "Llama-3" in lm_name:
@@ -238,10 +234,10 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
         # add_special_tokens=False is really important as it affects probability A LOT!
         # those bos, eos are already added in make_prompt for llama3
         prompt_ans_lm_inputs = lm_tokenizer(
-            prompt, answer, max_length=max_length, padding=True, truncation=True, 
+            prompt, answer_to_encode, max_length=max_length, padding=True, truncation=True, 
             return_tensors='pt', return_token_type_ids=True,
             add_special_tokens=False if "Llama-3" in lm_name else True,
-        )
+        ) # dict of keys: input_ids, attention_mask, token_type_ids. Each of shape [num_orig_question * n_comb, n_dim]
     
     # update max token length
     global max_ret_token_len, max_lm_token_len
@@ -252,18 +248,19 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
         "query_inputs": query_inputs, # dict
         "doc_embeddings": doc_embeddings, # tensor, [bs,n_dim]
         "prompt_ans_lm_inputs": prompt_ans_lm_inputs, # dict
-        "num_has_answer": num_has_answer, # int
     }
     if mode == "eval":
-        res_dict["qid"] = [x[4] for x in samples] # list[str], to fetch full answer later
+        n_comb = prompt_ans_lm_inputs["input_ids"].shape[0] // num_orig_question
+        res_dict["full_answers"] = [x[2] for i, x in enumerate(samples) if i % n_comb == 0] # list of list of str; len = num_orig_question
+        assert len(res_dict["full_answers"]) == num_orig_question, f"len(res_dict['full_answers']) ({len(res_dict['full_answers'])}) != num_orig_question ({num_orig_question})"
         if "llama" in lm_name.lower():
-            res_dict["prompt_strs"] = prompt # list[str]
+            res_dict["prompt_strs"] = prompt # list[str], len = num_orig_question * n_comb
     return res_dict
 
 # %%
 def validate(
         query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
-        accelerator, model_max_length, train_step_logdir, full_answers
+        accelerator, model_max_length, train_step_logdir
 ):
     # %%
     logger.info(f"*** Start validation at {train_step_logdir.split('/')[-1]} ***")
@@ -279,33 +276,26 @@ def validate(
     total_too_long = 0
     total_has_answer = 0
     total_num_correct_pick = 0
-    cache = {}
-    clear_cache_countdown = 5
 
     # %%
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
         # %%
-        # make raw_batch into a extened batch
-        # by first extend each item and then collate_fn
+        # make raw_batch into a extened batch by first extend each item and then collate_fn
         with torch.no_grad():
             extended_batch = [inloop_extend_item(
                 data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args, cache=cache
+                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
             ) for x in raw_batch]
         batch = inloop_collate_fn(
             samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
             lm_name=args.lm_model, args=args, mode="eval"
-        )
-        clear_cache_countdown -= 1
-        if clear_cache_countdown == 0:
-            cache = {}
-            clear_cache_countdown = 5
+        ) # dict of keys: query_inputs, doc_embeddings, prompt_ans_lm_inputs, full_answers, [prompt_strs]
         del extended_batch, raw_batch
         
         batch["doc_embeddings"] = batch["doc_embeddings"].to(accelerator.device)
         batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
         batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
-
+    
         logger.info(f"[validation step {step}/{num_batches}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
         logger.info(f"[validation step {step}/{num_batches}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
         
@@ -338,7 +328,7 @@ def validate(
             doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
             num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
-            retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
+            retriever_cossim = retriever_cossim.view(num_orig_question, -1)
             logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
@@ -372,7 +362,7 @@ def validate(
                     logger=logger,
                     # tokenizer=lm_tokenizer, # for debugging only
                 )
-            logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
             if args.loss_type == "kl_div":
                 loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
@@ -389,7 +379,13 @@ def validate(
 
             # # %%
             # # ### debug
-            # print(f"retriever_cossim: {retriever_cossim}")
+            for i in range(min(10,num_orig_question)):
+                print(f"retriever_cossim: {retriever_cossim[i]}")
+                print(f"retriever's pick: {retrievers_pick[i]}")
+                print(f"lm_prob: {lm_prob[i]}")
+                print(f"retrievers pick lm score: {lm_prob[i][retrievers_pick[i]]}")
+                print(f"lm score each question max: {lm_prob[i][torch.argmax(lm_prob[i])]}")
+                print(f"Retriever pick == LM pick? {retrievers_pick[i] == torch.argmax(lm_prob[i])}")
             # print(f"softmax retriever score: {F.softmax(retriever_cossim / args.ret_temperature,dim=1)}")
             
             # print(f"lm_prob.shape: {lm_prob.shape}")
@@ -424,25 +420,45 @@ def validate(
             del retriever_cossim, lm_prob
             torch.cuda.empty_cache()
             gc.collect()
-            logger.info(f"[Emptied scoring cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Emptied scoring cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             # ## Metric 3. Exact match
-            for k,v in batch['prompt_ans_lm_inputs'].items():
-                logger.debug(f"{k}: {v.shape}")
-                v = v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick]
+            # reshape batch['prompt_ans_lm_inputs'] to [n_question,n_comb,n_dim]
+            # %%
+            # # debug: check if the picked one is really the same as the max one
+            # for i in range(batch['prompt_ans_lm_inputs']['input_ids'].shape[0] // num_orig_question):
+            #     tmp_str = lm_tokenizer.decode(batch['prompt_ans_lm_inputs']['input_ids'][i], skip_special_tokens=True)
+            #     logger.debug(f"{i}th option: {tmp_str}")
+            # logger.debug(f"Picked retrievers_pick idx: {retrievers_pick[0]}")
+
+            logger.debug(f'batch["prompt_ans_lm_inputs"]["input_ids"].shape: {batch["prompt_ans_lm_inputs"]["input_ids"].shape}')
+            n_comb = batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] // num_orig_question
+            logger.debug(f"n_comb: {n_comb}")
+            batch['prompt_ans_lm_inputs'] = {
+                k: v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick] \
+                for k,v in batch['prompt_ans_lm_inputs'].items()
+            } # [n_question,n_comb,n_dim] -> [n_question,n_dim]
+            assert batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] == num_orig_question, f"batch['prompt_ans_lm_inputs']['input_ids'].shape[0] ({batch['prompt_ans_lm_inputs']['input_ids'].shape[0]}) != num_orig_question ({num_orig_question})"
+            # tmp_str = lm_tokenizer.decode(batch['prompt_ans_lm_inputs']['input_ids'][0], skip_special_tokens=True)
+            # logger.debug(f"Picked option: {tmp_str}")
+
+            # only leave the retriever's pick full_answers, all_qid, prompt_strs
+            # use it to index full_answers, all_qid, prompt_strs
+            if "llama" in args.lm_model.lower():
+                batch["prompt_strs"] = [batch["prompt_strs"][pick + i * n_comb] for i, pick in enumerate(retrievers_pick)]
+                assert len(batch["prompt_strs"]) == num_orig_question, f"len(batch['prompt_strs']) ({len(batch['prompt_strs'])}) != num_orig_question ({num_orig_question})"
 
             # %%
-            # TODO debug this new change
+            # TODO (優化) llama 好像其實不用 prompt_ans_lm_inputs, 只要 prompt_strs 就好
             batch_result = lm_gen_and_check(
                 model=language_model, 
                 tokenizer=lm_tokenizer,
                 device=accelerator.device,
                 accelerator=accelerator,
                 max_length=model_max_length,
-                prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'],
-                full_answers=full_answers,
-                all_qid=batch["qid"],
-                prompt_strs = batch["prompt_strs"] if "llama" in args.lm_model.lower() else None,
+                prompt_ans_lm_inputs=batch['prompt_ans_lm_inputs'], # for t5
+                prompt_strs = batch["prompt_strs"] if "llama" in args.lm_model.lower() else None, # for llama
+                all_full_answers=batch["full_answers"],
                 max_tokens_to_generate=args.max_tokens_to_generate,
                 llm_batch_size=args.eval_llm_batch_size,
                 logger=logger,
@@ -451,7 +467,7 @@ def validate(
             total_num_examples += batch_result["num_examples"]
             total_too_long += batch_result["too_long"]
             all_predictions.extend(batch_result["predictions"])
-            total_has_answer += batch["num_has_answer"]
+            total_has_answer += batch_result["num_has_answer"]
 
     # %%
     # write retriever pick to train_step_logdir
@@ -467,10 +483,11 @@ def validate(
         "avg_prob": total_ans_prob / total_num_examples, # 這裡原本算錯啦! 原本是每個 batch 的 mean 加起來再除以 num_batches
         "exact_match (%)": total_num_correct / total_num_examples * 100,
         "too_long (%)": total_too_long / total_num_examples * 100,
-        "has_answer (%)": total_has_answer / total_num_examples * 100,
+        "has_answer (%)": total_has_answer / total_num_examples * 100, # 這裡原本算錯啦! 原本是所有 comb 的都算 但其實應該只能看選出來的那個
         "retriever_pick_acc (%)": total_num_correct_pick / total_num_examples * 100,
     }
     logger.info(f"Done {train_step_logdir.split('/')[-1]} step validation.")
+    logger.info(f"total_num_examples: {total_num_examples}")
     for k,v in final_result.items():
         logger.info(f"{k}: {v}")
     return final_result
@@ -511,17 +528,21 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"(test-fit) ({args.data_size}) (lr {args.lr}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep"}}
+                f"(test-fit) ({args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
-        CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
-        # if this dir already exist, exit successfully
-        if os.path.exists(CKPT_DIR):
-            logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
-            return
+        if args.sweep:
+            # exit if folder already exists
+            CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
+            # if this dir already exist, exit successfully
+            if os.path.exists(CKPT_DIR):
+                logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
+                return
+        else:
+            CKPT_DIR = os.path.join(args.ckpt_dir, wandb_tracker.run.id)
         os.makedirs(CKPT_DIR)
         logger.info(f"Logging to {LOG_DIR}, create CKPT_DIR {CKPT_DIR}...")
         wandb_tracker.run.log_code(".")
@@ -539,6 +560,7 @@ def main():
             # except for resume_training, resume_path, resume_wandb_id
             exception_keys = ["resume_training", "resume_path", "resume_wandb_id"]
             for k,v in vars(args).items():
+                logger.info(f"args.{k}: {v}")
                 if k not in exception_keys:
                     assert wandb_tracker.run.config[k] == v, \
                     f"config {k} is different from resumed one: {wandb_tracker.run.config[k]} != {v}"
@@ -681,18 +703,11 @@ def main():
 
     # TODO add feature of empty doc representation
 
-    # expand question and each answer to a qa pair
-    # and keep a list of original idx
-    train_qa_pairs = []
-    for qid, sample in enumerate(train_data):
-        for ans in sample['answers']:
-            train_qa_pairs.append((normalize_query(sample['question']), [""], ans, empty_doc_embedding, qid))
-    dev_qa_pairs = []
-    dev_full_answers = [] # for evaluation, keep all answers for a question
-    for qid, sample in enumerate(dev_data):
-        dev_full_answers.append(sample['answers'])
-        for ans in sample['answers']:
-            dev_qa_pairs.append((normalize_query(sample['question']), [""], ans, empty_doc_embedding, qid))
+    # Answer is a LIST instead of a str
+    # In train set, only select one answer for each question
+    train_qa_pairs = [(normalize_query(sample['question']), [""], [sample['answers'][0]], empty_doc_embedding) for sample in train_data]
+    # In dev set, keep track of full answer list of each question
+    dev_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'], empty_doc_embedding) for sample in dev_data]
 
     logger.info(f"len(train_qa_pairs): {len(train_qa_pairs)}")
     logger.info(f"len(dev_qa_pairs): {len(dev_qa_pairs)}")
@@ -700,7 +715,6 @@ def main():
     logger.info(f"len(dev_corpus): {len(dev_corpus)}")
     logger.info(f"len(train_doc_embeddings): {len(train_doc_embeddings)}")
     logger.info(f"len(dev_doc_embeddings): {len(dev_doc_embeddings)}")
-    logger.info(f"len(dev_full_answers): {len(dev_full_answers)}")
 
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
@@ -760,7 +774,7 @@ def main():
         if not os.path.exists(train_step_logdir):
             os.makedirs(train_step_logdir)
     # %%
-        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir, dev_full_answers)
+        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir)
         accelerator.log({"eval":eval_result}, step=completed_steps)
     best_em = eval_result["exact_match (%)"]
 
@@ -790,8 +804,8 @@ def main():
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
         logger.info(f"[Before load train data] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         
-        cache = {}
-        clear_cache_countdown = 5
+        # cache = {}
+        # clear_cache_countdown = 5
 
         for step,raw_batch in enumerate(train_dataloader):
             # make raw_batch into a extened batch
@@ -799,7 +813,7 @@ def main():
             with torch.no_grad():
                 extended_batch = [inloop_extend_item(
                     data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                    ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args, cache=cache
+                    ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
                 ) for x in raw_batch]
             batch = inloop_collate_fn(
                 samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
@@ -815,10 +829,10 @@ def main():
             logger.info(f"[train step {step} (globally {completed_steps})] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
             del extended_batch, raw_batch
 
-            clear_cache_countdown -= 1
-            if clear_cache_countdown == 0:
-                cache = {}
-                clear_cache_countdown = 5
+            # clear_cache_countdown -= 1
+            # if clear_cache_countdown == 0:
+            #     cache = {}
+            #     clear_cache_countdown = 5
 
             query_encoder.train()
             with accelerator.accumulate(query_encoder): # gradient accumulation
@@ -829,7 +843,7 @@ def main():
                         if "dpr" in args.query_encoder \
                         else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:]
                     doc_embedding = batch["doc_embeddings"]
-                    logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                    # logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     
                     # shape of both query_embedding and doc_embedding: [bs,n_dim]
                     # where bs = n_comb * num_orig_question
@@ -853,13 +867,13 @@ def main():
                     retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
                     num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
                     retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
-                    logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                    # logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
                     query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
                     del query_embedding, doc_embedding
                     torch.cuda.empty_cache()
                     gc.collect()
-                    logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+                    # logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     # very likely to OOM error here
                     if "t5" in args.lm_model:
@@ -885,7 +899,7 @@ def main():
                             llm_batch_size=args.train_llm_batch_size,
                             logger=logger,
                         )
-                    logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                    # logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
                     
                     # # try to fix RuntimeError: Found dtype Float but expected Half
                     # for param in query_encoder.parameters():
@@ -922,12 +936,12 @@ def main():
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=completed_steps)
                     
                     if completed_steps % EVAL_STEPS == 0 or completed_steps == MAX_TRAIN_STEPS:
-                        logger.info(f"[Before evaluation] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
+                        # logger.info(f"[Before evaluation] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
                         logger.info(f"[Before evaluation] max ret token len: {max_ret_token_len}; max lm token len: {max_lm_token_len}")
                         train_step_logdir = os.path.join(LOG_DIR,f"step-{completed_steps}")
                         if not os.path.exists(train_step_logdir):
                             os.makedirs(train_step_logdir)
-                        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir, dev_full_answers)
+                        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, train_step_logdir)
                         query_encoder.train() # Make sure the model is back in training mode after validation
                         accelerator.log({"eval":eval_result}, step=completed_steps)
                         accelerator.wait_for_everyone()
