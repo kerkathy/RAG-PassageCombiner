@@ -635,9 +635,6 @@ def main():
     train_index_path = os.path.join(index_dir, f"train_{train_size}.pt")
     dev_index_path = os.path.join(index_dir, f"dev_{dev_size}.pt")
     empty_doc_embedding_path = os.path.join(index_dir, "empty_doc.pt")
-    # train_index_path = os.path.join(args.index_dir, f"train_{train_size}.pt")
-    # dev_index_path = os.path.join(args.index_dir, f"dev_{dev_size}.pt")
-    # empty_doc_embedding_path = os.path.join(args.index_dir, "empty_doc.pt")
 
     if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
         logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 

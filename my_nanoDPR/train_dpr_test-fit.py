@@ -41,7 +41,6 @@ from utils import (
     load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
     make_prompt,
-    text_has_answer,
 )
 
 debug = False # set log mode to debug, and stop wandb logging
@@ -87,8 +86,6 @@ def calculate_KL_div_loss(
     # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
     # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     kl_loss = nn.KLDivLoss(reduction="batchmean")
-    # [experiment-1] minus loss
-    # print("--- Doing experiment-1: minus loss ---")
     loss = kl_loss(
         F.log_softmax(input_logits / temperature[0], dim=1), # input should be a distribution in the log space
         F.softmax(target_logits / temperature[1], dim=1),
@@ -106,16 +103,29 @@ def calculate_cross_entropy_loss(
     """
     global logger
     # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")D
+    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
     ce_loss = nn.CrossEntropyLoss() # reduction is mean by default
     input_logits = input_logits / temperature[0]
-    # [experiment-1] minus loss
-    # print("--- Doing experiment-1: minus loss ---")
     loss = ce_loss(
         input=input_logits, # input is expected to contain the unnormalized logits for each class
         target=torch.argmax(target_logits, dim=1),
     )
     return loss 
+
+def calculate_nll_loss(
+    doc_scores, # [n_question,n_comb]
+    seq_probs, # [n_question,n_comb]
+):
+    """
+    Following RAG paper, calculate negative log likelihood loss
+    prob_y_given_x = doc similarity score * answer probability
+    NLL = -log(prob_y_given_x)
+    """
+    # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
+    doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
+    seq_logprobs = seq_probs.log()
+    nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
+    return nll_loss
 
 class QADataset(torch.utils.data.Dataset):
     def __init__(self, qa_pairs, all_corpus, all_doc_embeddings):
@@ -171,9 +181,8 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
             cur_visited += 1
 
             # Retrieve top k documents
-            # logger.debug(f"query: {doc_list[-1] + ' ' + query}")
-            doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
-            # doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k, cache)
+            with torch.no_grad():
+                doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
             # Append new data
             for docid in doc_ids:
                 new_doc_list = doc_list + [corpus[docid]]
@@ -181,7 +190,14 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
 
                 # Increment next_pointer
                 next_round_should_visited += 1
-    # logger.debug(f"After getitem, data size: {len(data)}")
+
+    # debug: temporarily remove empty document
+    if not args.empty_doc:
+        num_data_before_remove = len(data)
+        data = [x for x in data if x[1] != [""]]
+        num_data_after_remove = len(data)
+        assert num_data_before_remove == num_data_after_remove + 1, f"num_data_before_remove ({num_data_before_remove}) != num_data_after_remove + 1 ({num_data_after_remove + 1})"
+
     return data  # List of tuples
 
 # %%
@@ -276,16 +292,16 @@ def validate(
     total_too_long = 0
     total_has_answer = 0
     total_num_correct_pick = 0
+    total_f1_score = 0
 
     # %%
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
         # %%
         # make raw_batch into a extened batch by first extend each item and then collate_fn
-        with torch.no_grad():
-            extended_batch = [inloop_extend_item(
-                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
-            ) for x in raw_batch]
+        extended_batch = [inloop_extend_item(
+            data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
+            ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+        ) for x in raw_batch]
         batch = inloop_collate_fn(
             samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
             lm_name=args.lm_model, args=args, mode="eval"
@@ -327,7 +343,8 @@ def validate(
             query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
             doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
-            num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
+            num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
+                else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
             retriever_cossim = retriever_cossim.view(num_orig_question, -1)
             logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
@@ -366,6 +383,8 @@ def validate(
             
             if args.loss_type == "kl_div":
                 loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
+            elif args.loss_type == "rag":
+                loss = calculate_nll_loss(doc_scores=retriever_cossim, seq_probs=lm_prob)
             else:
                 loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
             total_loss += loss.item()
@@ -468,6 +487,7 @@ def validate(
             total_too_long += batch_result["too_long"]
             all_predictions.extend(batch_result["predictions"])
             total_has_answer += batch_result["num_has_answer"]
+            total_f1_score += batch_result["sum_f1"]
 
     # %%
     # write retriever pick to train_step_logdir
@@ -477,7 +497,6 @@ def validate(
     with open(os.path.join(train_step_logdir, "prediction.json"), "w", encoding='utf-8') as f:
         for item in all_predictions:
             f.write(item + "\n")
-
     final_result = {
         "avg_loss": total_loss / len(dev_dataloader), # 這裡原本算錯啦! 應該以 batch 為單位才對
         "avg_prob": total_ans_prob / total_num_examples, # 這裡原本算錯啦! 原本是每個 batch 的 mean 加起來再除以 num_batches
@@ -485,13 +504,13 @@ def validate(
         "too_long (%)": total_too_long / total_num_examples * 100,
         "has_answer (%)": total_has_answer / total_num_examples * 100, # 這裡原本算錯啦! 原本是所有 comb 的都算 但其實應該只能看選出來的那個
         "retriever_pick_acc (%)": total_num_correct_pick / total_num_examples * 100,
+        "f1_score": total_f1_score / total_num_examples,
     }
     logger.info(f"Done {train_step_logdir.split('/')[-1]} step validation.")
     logger.info(f"total_num_examples: {total_num_examples}")
     for k,v in final_result.items():
         logger.info(f"{k}: {v}")
     return final_result
-
 
 # %%
 def main():
@@ -528,7 +547,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"(test-fit) ({args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep"}}
+                f"(test-fit) ({args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) ({args.empty_doc} empty) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type})"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -537,7 +556,6 @@ def main():
         if args.sweep:
             # exit if folder already exists
             CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
-            # if this dir already exist, exit successfully
             if os.path.exists(CKPT_DIR):
                 logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
                 return
@@ -553,6 +571,7 @@ def main():
                 f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
+                f"empty_doc: {args.empty_doc}",
                 "cossim_ret_score (correct)"
             ]
         else:
@@ -572,7 +591,6 @@ def main():
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
 
-    # %%
     if not debug and accelerator.is_local_main_process:
         wandb_tracker.run.watch(query_encoder, log_freq=500)
     # %%
@@ -594,7 +612,7 @@ def main():
 
     if args.data_size == "debug":
         train_size, dev_size = 50, 10
-    if args.data_size == "debug-fit-1":
+    elif args.data_size == "debug-fit-1":
         train_size, dev_size = 100, 100
     elif args.data_size == "1/10":
         train_size, dev_size = 10000, 1000
@@ -619,9 +637,10 @@ def main():
     logger.info(f"Size of train corpus: {len(train_corpus)}")
     logger.info(f"Size of dev corpus: {len(dev_corpus)}")
 
-    train_index_path = os.path.join(args.index_dir, f"train_{train_size}.pt")
-    # dev_index_path = os.path.join(args.index_dir, f"dev_{dev_size}.pt")
-    empty_doc_embedding_path = os.path.join(args.index_dir, "empty_doc.pt")
+    index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
+    train_index_path = os.path.join(index_dir, f"train_{train_size}.pt")
+    # dev_index_path = os.path.join(index_dir, f"dev_{dev_size}.pt")
+    empty_doc_embedding_path = os.path.join(index_dir, "empty_doc.pt")
 
     if os.path.exists(train_index_path) and os.path.exists(empty_doc_embedding_path):
     # if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
@@ -804,17 +823,13 @@ def main():
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
         logger.info(f"[Before load train data] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         
-        # cache = {}
-        # clear_cache_countdown = 5
-
         for step,raw_batch in enumerate(train_dataloader):
             # make raw_batch into a extened batch
             # by first extend each item and then collate_fn
-            with torch.no_grad():
-                extended_batch = [inloop_extend_item(
-                    data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                    ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
-                ) for x in raw_batch]
+            extended_batch = [inloop_extend_item(
+                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
+                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+            ) for x in raw_batch]
             batch = inloop_collate_fn(
                 samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
                 lm_name=args.lm_model, args=args, mode="train"
@@ -828,11 +843,6 @@ def main():
             logger.info(f"[train step {step} (globally {completed_steps})] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
             logger.info(f"[train step {step} (globally {completed_steps})] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
             del extended_batch, raw_batch
-
-            # clear_cache_countdown -= 1
-            # if clear_cache_countdown == 0:
-            #     cache = {}
-            #     clear_cache_countdown = 5
 
             query_encoder.train()
             with accelerator.accumulate(query_encoder): # gradient accumulation
@@ -865,7 +875,8 @@ def main():
                     query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
                     doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
                     retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
-                    num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)])
+                    num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
+                        else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
                     retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
                     # logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
@@ -912,6 +923,8 @@ def main():
 
                     if args.loss_type == "kl_div":
                         loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
+                    elif args.loss_type == "rag":
+                        loss = calculate_nll_loss(doc_scores=retriever_cossim, seq_probs=lm_prob)
                     else:
                         loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
@@ -953,7 +966,6 @@ def main():
                             if eval_result["exact_match (%)"] > best_em:
                                 best_em = eval_result["exact_match (%)"]
 
-                            # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
                             ckpt_path = os.path.join(CKPT_DIR, f"checkpoint-{completed_steps}.pt")
                             ensure_directory_exists_for_file(ckpt_path)
                             # unwrap the model from DDP
@@ -964,8 +976,6 @@ def main():
                                 'optimizer': unwrapped_optimizer.state_dict(),
                                 'lr_scheduler': lr_scheduler.state_dict(),
                                 'completed_steps': completed_steps,}, ckpt_path)
-                            # query_encoder.save_pretrained(query_encoder_path)
-                            # query_tokenizer.save_pretrained(query_encoder_path)
                             logger.info(f"Checkpoint saved to {ckpt_path}")
                             
                         accelerator.wait_for_everyone()
