@@ -36,7 +36,6 @@ from utils import (
     load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
     make_prompt,
-    text_has_answer,
 )
 
 debug = False # set log mode to debug, and stop wandb logging
@@ -162,9 +161,8 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
             cur_visited += 1
 
             # Retrieve top k documents
-            # logger.debug(f"query: {doc_list[-1] + ' ' + query}")
-            doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
-            # doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k, cache)
+            with torch.no_grad():
+                doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
             # Append new data
             for docid in doc_ids:
                 new_doc_list = doc_list + [corpus[docid]]
@@ -272,11 +270,10 @@ def validate(
     for step, raw_batch in tqdm(enumerate(dev_dataloader)):
         # %%
         # make raw_batch into a extened batch by first extend each item and then collate_fn
-        with torch.no_grad():
-            extended_batch = [inloop_extend_item(
-                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
-            ) for x in raw_batch]
+        extended_batch = [inloop_extend_item(
+            data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
+            ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+        ) for x in raw_batch]
         batch = inloop_collate_fn(
             samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
             lm_name=args.lm_model, args=args, mode="eval"
@@ -528,7 +525,6 @@ def main():
         if args.sweep:
             # exit if folder already exists
             CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
-            # if this dir already exist, exit successfully
             if os.path.exists(CKPT_DIR):
                 logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
                 return
@@ -563,7 +559,6 @@ def main():
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
 
-    # %%
     if not debug and accelerator.is_local_main_process:
         wandb_tracker.run.watch(query_encoder, log_freq=500)
     # %%
@@ -635,11 +630,13 @@ def main():
             else:
                 logger.info(f"...Loading train index from {train_index_path}...")
                 train_doc_embeddings = torch.load(train_index_path)
-                dev_doc_embeddings = train_doc_embeddings[:dev_size]
             if not os.path.exists(dev_index_path):
                 logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
                 dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
                 torch.save(dev_doc_embeddings, dev_index_path)
+            else:
+                logger.info(f"...Loading dev index from {dev_index_path}...")
+                dev_doc_embeddings = torch.load(dev_index_path)
             if not os.path.exists(empty_doc_embedding_path):
                 logger.info(f"...Creating empty embedding ...")
                 empty_doc_embedding = make_index(["[UNK]"], doc_tokenizer, doc_encoder).squeeze() # for empty document
@@ -777,23 +774,18 @@ def main():
 
     start_time = time.time()
 
-
     for epoch in range(MAX_TRAIN_EPOCHS):
         set_seed(args.seed+epoch)
         progress_bar.set_description(f"epoch: {epoch+1}/{MAX_TRAIN_EPOCHS}")
         logger.info(f"[Before load train data] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
         
-        # cache = {}
-        # clear_cache_countdown = 5
-
         for step,raw_batch in enumerate(train_dataloader):
             # make raw_batch into a extened batch
             # by first extend each item and then collate_fn
-            with torch.no_grad():
-                extended_batch = [inloop_extend_item(
-                    data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                    ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
-                ) for x in raw_batch]
+            extended_batch = [inloop_extend_item(
+                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
+                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+            ) for x in raw_batch]
             batch = inloop_collate_fn(
                 samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
                 lm_name=args.lm_model, args=args, mode="train"
@@ -807,11 +799,6 @@ def main():
             logger.info(f"[train step {step} (globally {completed_steps})] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
             logger.info(f"[train step {step} (globally {completed_steps})] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
             del extended_batch, raw_batch
-
-            # clear_cache_countdown -= 1
-            # if clear_cache_countdown == 0:
-            #     cache = {}
-            #     clear_cache_countdown = 5
 
             query_encoder.train()
             with accelerator.accumulate(query_encoder): # gradient accumulation
@@ -932,7 +919,6 @@ def main():
                             if eval_result["exact_match (%)"] > best_em:
                                 best_em = eval_result["exact_match (%)"]
 
-                            # query_encoder_path = os.path.join(train_step_logdir, "query_encoder")
                             ckpt_path = os.path.join(CKPT_DIR, f"checkpoint-{completed_steps}.pt")
                             ensure_directory_exists_for_file(ckpt_path)
                             # unwrap the model from DDP
@@ -943,8 +929,6 @@ def main():
                                 'optimizer': unwrapped_optimizer.state_dict(),
                                 'lr_scheduler': lr_scheduler.state_dict(),
                                 'completed_steps': completed_steps,}, ckpt_path)
-                            # query_encoder.save_pretrained(query_encoder_path)
-                            # query_tokenizer.save_pretrained(query_encoder_path)
                             logger.info(f"Checkpoint saved to {ckpt_path}")
                             
                         accelerator.wait_for_everyone()
