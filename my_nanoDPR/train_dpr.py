@@ -38,7 +38,7 @@ from utils import (
     make_prompt,
 )
 
-debug = True # set log mode to debug, and stop wandb logging
+debug = False # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -336,7 +336,6 @@ def validate(
 
             # convert query_embedding and doc_embedding to unit vectors
             query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
-            doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
             num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
                 else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
@@ -393,7 +392,7 @@ def validate(
 
             # # %%
             # # ### debug
-            for i in range(min(10,num_orig_question)):
+            for i in range(min(3,num_orig_question)):
                 print(f"retriever_cossim: {retriever_cossim[i]}")
                 print(f"retriever's pick: {retrievers_pick[i]}")
                 print(f"lm_prob: {lm_prob[i]}")
@@ -632,47 +631,43 @@ def main():
     logger.info(f"Size of dev corpus: {len(dev_corpus)}")
 
     index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
-    train_index_path = os.path.join(index_dir, f"train_{train_size}.pt")
-    dev_index_path = os.path.join(index_dir, f"dev_{dev_size}.pt")
-    empty_doc_embedding_path = os.path.join(index_dir, "empty_doc.pt")
+    index_path = {
+        "train": os.path.join(index_dir, f"train_{train_size}.pt"),
+        "dev": os.path.join(index_dir, f"dev_{dev_size}.pt"),
+        "empty_doc": os.path.join(index_dir, "empty_doc.pt")
+    }
+    if args.index_is_normed:
+        index_path = {split: path.replace(".pt", "_norm.pt") for split,path in index_path.items()}
 
-    if os.path.exists(train_index_path) and os.path.exists(dev_index_path) and os.path.exists(empty_doc_embedding_path):
-        logger.info(f"...Loading index from {train_index_path} and {dev_index_path}...") 
-        # skip those exemplars
-        train_doc_embeddings = torch.load(train_index_path)
-        dev_doc_embeddings = torch.load(dev_index_path)
-        empty_doc_embedding = torch.load(empty_doc_embedding_path)
-        assert len(train_doc_embeddings) == len(train_corpus), f"len(train_doc_embeddings) ({len(train_doc_embeddings)}) != len(train_corpus), ({len(train_corpus)})"
-        assert len(dev_doc_embeddings) == len(dev_corpus), f"len(dev_doc_embeddings) ({len(dev_doc_embeddings)}) != len(dev_corpus), ({len(dev_corpus)})"
+    if all([os.path.exists(path) for path in index_path.values()]):
+        logger.info(f"...Loading index from {index_path.values()}...") 
+        doc_embeddings = {
+            "train": torch.load(index_path["train"]),
+            "dev": torch.load(index_path["dev"]),
+            "empty_doc": torch.load(index_path["empty_doc"])
+        }
+        assert len(doc_embeddings['train']) == len(train_corpus), f"len(doc_embeddings['train']) ({len(doc_embeddings['train'])}) != len(train_corpus), ({len(train_corpus)})"
+        assert len(doc_embeddings['dev']) == len(dev_corpus), f"len(doc_embeddings['dev']) ({len(doc_embeddings['dev'])}) != len(dev_corpus), ({len(dev_corpus)})"
     else:
         doc_tokenizer, doc_encoder = load_doc_encoder_and_tokenizer(args, logger)
         doc_encoder = accelerator.prepare(doc_encoder)
         logger.info(f"doc_encoder is on {doc_encoder.device}")
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
-        with torch.no_grad():
-            if not os.path.exists(train_index_path):
-                logger.info(f"...Creating train index with size {len(train_corpus)}...")
-                train_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
-                torch.save(train_doc_embeddings, train_index_path)
+        for split, corpus in zip(["train", "dev"], [train_corpus, dev_corpus]):
+            if os.path.exists(index_path[split]):
+                logger.info(f"...Loading {split} index from {index_path[split]}...")
+                doc_embeddings[split] = torch.load(index_path[split])
             else:
-                logger.info(f"...Loading train index from {train_index_path}...")
-                train_doc_embeddings = torch.load(train_index_path)
-            if not os.path.exists(dev_index_path):
-                logger.info(f"...Creating dev index with size {len(dev_corpus)}...")
-                dev_doc_embeddings = [make_index(corpus, doc_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
-                torch.save(dev_doc_embeddings, dev_index_path)
-            else:
-                logger.info(f"...Loading dev index from {dev_index_path}...")
-                dev_doc_embeddings = torch.load(dev_index_path)
-            if not os.path.exists(empty_doc_embedding_path):
-                logger.info(f"...Creating empty embedding ...")
-                empty_doc_embedding = make_index(["[UNK]"], doc_tokenizer, doc_encoder).squeeze() # for empty document
-                torch.save(empty_doc_embedding, empty_doc_embedding_path)
-            else:
-                logger.info(f"...Loading empty embedding ...")
-                empty_doc_embedding = torch.load(empty_doc_embedding_path)
-        logger.info(f"Index saved to {train_index_path}, {dev_index_path}, {empty_doc_embedding_path}")
+                raise ValueError(f"Index file {index_path[split]} not found. Please prepcoess_idx.py first.")
+
+        if os.path.exists(index_path["empty_doc"]):
+            logger.info(f"...Loading empty embedding ...")
+            doc_embeddings['empty_doc'] = torch.load(index_path["empty_doc"])
+        else:
+            raise ValueError(f"Index file {index_path['empty_doc']} not found. Please prepcoess_idx.py first.")
+
+        logger.info(f"Loaded {index_path['train']}, {index_path['dev']}, {index_path['empty_doc']}")
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
         logger.info("...Deleting doc_encoder...")
@@ -682,49 +677,43 @@ def main():
         gc.collect()
         logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
+    # if normed, check if the norm is correct
+    if args.index_is_normed:
+        for split, emb_list in doc_embeddings.items():
+            # only check the first one
+            print("Checking norm of ", split)
+            emb = emb_list[0] if split != "empty_doc" else emb_list
+            print(f"Shape: {emb.shape}")
+            assert torch.allclose(torch.sum(emb**2, dim=-1), torch.ones(emb.shape[0]), atol=1e-5), f"Norm of {split} is not correct. Shape: {emb.shape}. Norm: {torch.sum(emb**2, dim=1)}"
+
     # take the [args.num_exemplars:] 
     train_data = train_data[args.num_exemplars:]
     dev_data = dev_data[args.num_exemplars:]
     train_corpus = train_corpus[args.num_exemplars:]
     dev_corpus = dev_corpus[args.num_exemplars:]
-    train_doc_embeddings = train_doc_embeddings[args.num_exemplars:]
-    dev_doc_embeddings = dev_doc_embeddings[args.num_exemplars:]
-
-    # # %%
-    # gold_path = os.path.join(LOG_DIR, args.gold_dev_answers_path)
-    # if not os.path.exists(gold_path):
-    #     logger.info(f"...Creating gold answers for dev set...")
-    #     ensure_directory_exists_for_file(gold_path)
-    #     gold_answers = []
-    #     for sample in dev_data:
-    #         gold_answers.append(sample['answers']) # log all answer 
-    #         # gold_answers.append(sample['answers'][0])
-    #     with open(gold_path, "w") as f:
-    #         for ans in gold_answers:
-    #             f.write(str(ans) + "\n")
-    #     logger.info(f"Gold answers saved to {gold_path}")
-    #     del gold_answers
+    doc_embeddings['train'] = doc_embeddings['train'][args.num_exemplars:]
+    doc_embeddings['dev'] = doc_embeddings['dev'][args.num_exemplars:]
 
     # TODO add feature of empty doc representation
 
     # Answer is a LIST instead of a str
     # In train set, only select one answer for each question
-    train_qa_pairs = [(normalize_query(sample['question']), [""], [sample['answers'][0]], empty_doc_embedding) for sample in train_data]
     # In dev set, keep track of full answer list of each question
-    dev_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'], empty_doc_embedding) for sample in dev_data]
+    train_qa_pairs = [(normalize_query(sample['question']), [""], [sample['answers'][0]], doc_embeddings['empty_doc']) for sample in train_data]
+    dev_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'], doc_embeddings['empty_doc']) for sample in dev_data]
 
     logger.info(f"len(train_qa_pairs): {len(train_qa_pairs)}")
     logger.info(f"len(dev_qa_pairs): {len(dev_qa_pairs)}")
     logger.info(f"len(train_corpus): {len(train_corpus)}")
     logger.info(f"len(dev_corpus): {len(dev_corpus)}")
-    logger.info(f"len(train_doc_embeddings): {len(train_doc_embeddings)}")
-    logger.info(f"len(dev_doc_embeddings): {len(dev_doc_embeddings)}")
+    logger.info(f"len(doc_embeddings['train']): {len(doc_embeddings['train'])}")
+    logger.info(f"len(doc_embeddings['dev']): {len(doc_embeddings['dev'])}")
 
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-    train_dataset = QADataset(train_qa_pairs, train_corpus, train_doc_embeddings)
-    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, dev_doc_embeddings)
+    train_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train'])
+    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, doc_embeddings['dev'])
     
     logger.info("...Deleting train_data and dev_data...")
     del train_data, dev_data
@@ -857,7 +846,6 @@ def main():
                         query_embedding = torch.cat(query_list, dim=0)
 
                     query_embedding = F.normalize(query_embedding, p=2, dim=1) # p: norm type
-                    doc_embedding = F.normalize(doc_embedding, p=2, dim=1)
                     retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
                     num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
                         else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
@@ -896,15 +884,6 @@ def main():
                         )
                     # logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
                     
-                    # # try to fix RuntimeError: Found dtype Float but expected Half
-                    # for param in query_encoder.parameters():
-                    #     # Check if parameter dtype is  Float (float32)
-                    #     if param.dtype == torch.float32:
-                    #         param.data = param.data.to(torch.float16)
-                    # try to fix RuntimeError: Found dtype Float but expected Half
-                    # retriever_cossim = retriever_cossim
-                    # lm_prob = lm_prob
-
                     if args.loss_type == "kl_div":
                         loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     elif args.loss_type == "rag":
@@ -981,5 +960,4 @@ def main():
 
 # %%
 if __name__ == '__main__':
-    # torch.multiprocessing.set_start_method('spawn') # try to fix the cuda init error when we put query encoder on cuda
     main()
