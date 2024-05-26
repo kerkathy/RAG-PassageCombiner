@@ -1,0 +1,12 @@
+## data
+train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train/formatted-ms2.nq-train.hits-100.json
+dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev/formatted-ms2.nq-dev.hits-100.json
+
+## training
+encoder_type: dpr # dpr, contriever, bert...
+retriever_model: facebook/dpr-ctx_encoder-single-nq-base # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever
+train_index_path: embeddings/dpr/train_10000.pt # embeddings/dpr/train_10000.pt 
+dev_index_path: embeddings/dpr/dev_1000.pt # embeddings/dpr/dev_1000.pt 
+empty_doc_embedding_path: embeddings/dpr/empty_doc.pt
+gold_dev_answers_path: results/nq-dev-answers.json
+seed: 19980406
