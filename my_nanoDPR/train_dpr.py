@@ -651,33 +651,9 @@ def main():
         assert len(doc_embeddings['train']) == len(train_corpus), f"len(doc_embeddings['train']) ({len(doc_embeddings['train'])}) != len(train_corpus), ({len(train_corpus)})"
         assert len(doc_embeddings['dev']) == len(dev_corpus), f"len(doc_embeddings['dev']) ({len(doc_embeddings['dev'])}) != len(dev_corpus), ({len(dev_corpus)})"
     else:
-        doc_tokenizer, doc_encoder = load_doc_encoder_and_tokenizer(args, logger)
-        doc_encoder = accelerator.prepare(doc_encoder)
-        logger.info(f"doc_encoder is on {doc_encoder.device}")
-        logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-
-        for split, corpus in zip(["train", "dev"], [train_corpus, dev_corpus]):
-            if os.path.exists(index_path[split]):
-                logger.info(f"...Loading {split} index from {index_path[split]}...")
-                doc_embeddings[split] = torch.load(index_path[split])
-            else:
-                raise ValueError(f"Index file {index_path[split]} not found. Please prepcoess_idx.py first.")
-
-        if os.path.exists(index_path["empty_doc"]):
-            logger.info(f"...Loading empty embedding ...")
-            doc_embeddings['empty_doc'] = torch.load(index_path["empty_doc"])
-        else:
-            raise ValueError(f"Index file {index_path['empty_doc']} not found. Please prepcoess_idx.py first.")
-
-        logger.info(f"Loaded {index_path['train']}, {index_path['dev']}, {index_path['empty_doc']}")
-        logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-
-        logger.info("...Deleting doc_encoder...")
-        doc_encoder = doc_encoder.to("cpu")
-        del doc_encoder
-        torch.cuda.empty_cache()
-        gc.collect()
-        logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+        for split, path in index_path.items():
+            if not os.path.exists(path):
+                raise ValueError(f"{split} Index file {path} not found. Please prepcoess_idx.py first.")
 
     # if normed, check if the norm is correct
     if args.index_is_normed:

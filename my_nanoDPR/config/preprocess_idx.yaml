@@ -7,13 +7,13 @@ encoder_type: dpr # dpr, contriever, bert...
 retriever_model: facebook/dpr-ctx_encoder-single-nq-base # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever
 train_index_path: embeddings/dpr/train_10000.pt # embeddings/dpr/train_10000.pt 
 dev_index_path: embeddings/dpr/dev_1000.pt # embeddings/dpr/dev_1000.pt 
-empty_doc_embedding_path: embeddings/dpr/empty_doc.pt
-gold_dev_answers_path: results/nq-dev-answers.json
+empty_index_path: embeddings/dpr/empty_doc.pt
 seed: 19980406
 
 # preprocess option
 on_train: True
 on_dev: False
+on_empty: True
 extract: True
 train_k: 1000
 dev_k: 

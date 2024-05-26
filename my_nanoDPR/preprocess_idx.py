@@ -40,7 +40,7 @@ class Index:
         self.dev_doc_embeddings = None
         self.empty_doc_embedding = None
 
-    def create(self, train=False, dev=False):
+    def create(self, train=False, dev=False, empty=False):
         """
         Choose to create the index for train or dev data or both
         """
@@ -59,9 +59,7 @@ class Index:
             train_corpus = [[x['text'] for x in sample['ctxs']] for sample in train_data]
             print(f"Size of train corpus: {len(train_corpus)}")
             self.train_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(train_corpus)]
-            self.empty_doc_embedding = make_index(["[UNK]"], ret_tokenizer, doc_encoder).squeeze()
-            print(f"TRAIN Index and Empty doc embedding calculated")
-
+            print(f"Train doc embedding calculated")
         if dev:
             print(f"...Loading data from {self.args.dev_file}...")
             dev_data = json.load(open(self.args.dev_file))
@@ -71,8 +69,12 @@ class Index:
             print(f"Size of dev corpus: {len(dev_corpus)}")
             self.dev_doc_embeddings = [make_index(corpus, ret_tokenizer, doc_encoder) for corpus in tqdm(dev_corpus)]
             print(f"DEV Index calculated")
+        if empty:
+            self.empty_doc_embedding = make_index(["[UNK]"], ret_tokenizer, doc_encoder).squeeze()
+            print(f"Empty doc embedding calculated")
 
-    def read(self, train=False, dev=False):
+
+    def read(self, train=False, dev=False, empty=False):
         if train:
             print(f"...Loading index from {self.args.train_index_path}...")
             self.train_doc_embeddings = torch.load(self.args.train_index_path)
@@ -81,6 +83,10 @@ class Index:
             print(f"...Loading index from {self.args.dev_index_path}...")
             self.dev_doc_embeddings = torch.load(self.args.dev_index_path)
             print(f"Finish! Size of dev index: {len(self.dev_doc_embeddings)}")
+        if empty:
+            print(f"...Loading index from {self.args.empty_index_path}...")
+            self.empty_doc_embedding = torch.load(self.args.empty_index_path)
+            print(f"Finish! Size of empty index: {len(self.empty_doc_embedding)}")
 
     def extract(self):
         if self.train_doc_embeddings is not None:
@@ -111,8 +117,8 @@ class Index:
         if self.empty_doc_embedding is not None:
             print(f"Converting empty embeddings into unit vectors...")
             self.empty_doc_embedding = F.normalize(self.empty_doc_embedding.squeeze(), p=2, dim=0)
-            self.empty_doc_embedding_path = self.args.empty_doc_embedding_path.replace(".pt", "_norm.pt")
-            print(f"New Empty index path: {self.args.dev_index_path}")
+            self.args.empty_index_path = self.args.empty_index_path.replace(".pt", "_norm.pt")
+            print(f"New Empty index path: {self.args.empty_index_path}")
     
     def save(self):
         if self.train_doc_embeddings is not None:
@@ -130,11 +136,11 @@ class Index:
                 print(f"Saved the dev embeddings to {self.args.dev_index_path}")
 
         if self.empty_doc_embedding is not None:
-            if os.path.exists(self.empty_doc_embedding_path):
-                print(f"File {self.empty_doc_embedding_path} already exists. Not overwriting.")
+            if os.path.exists(self.args.empty_index_path):
+                print(f"File {self.args.empty_index_path} already exists. Not overwriting.")
             else:
-                torch.save(self.empty_doc_embedding, self.empty_doc_embedding_path)
-                print(f"Saved the empty embeddings to {self.args.empty_doc_embedding_path}")
+                torch.save(self.empty_doc_embedding, self.args.empty_index_path)
+                print(f"Saved the empty embeddings to {self.args.empty_index_path}")
 
     def process_and_save(self):
         action = {}
@@ -142,10 +148,12 @@ class Index:
             action["train"] = "read" if os.path.exists(self.args.train_index_path) else "create"
         if self.args.on_dev:
             action["dev"] = "read" if os.path.exists(self.args.dev_index_path) else "create"
+        if self.args.on_empty:
+            action["empty"] = "read" if os.path.exists(self.args.empty_index_path) else "create"
         to_read = [k for k,v in action.items() if v == "read"]
         to_create = [k for k,v in action.items() if v == "create"]
-        self.create(train=True if "train" in to_create else False, dev=True if "dev" in to_create else False)
-        self.read(train=True if "train" in to_read else False, dev=True if "dev" in to_read else False)
+        self.create(train=True if "train" in to_create else False, dev=True if "dev" in to_create else False, empty=True if "empty" in to_create else False)
+        self.read(train=True if "train" in to_read else False, dev=True if "dev" in to_read else False, empty=True if "empty" in to_read else False)
         if self.args.extract:
             self.extract()
         if self.args.normalize:
