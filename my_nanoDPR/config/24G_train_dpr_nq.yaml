@@ -5,8 +5,7 @@ train_file: formatted-ms2.nq-train.json
 dev_file: formatted-ms2.nq-dev.json
 dataset_name: nq
 empty_doc: False
-data_size: "debug"
-# "full": (train, dev) = (~79K, ~8K), "1/10": (train, dev) = (10K, 1K), "debug": (train, dev) = (50, 10), "debug-fit-1" = (100, 100)
+data_size: "tune_hp"
 index_is_normed: True
 gold_dev_answers_path: results/nq-dev-answers.json
 ckpt_dir: ckpt
@@ -28,13 +27,13 @@ quantized: False
 model_parallelism: False
 ## training
 loss_type: "rag" # kl_div, ce, rag
-max_round: 1
-k: 20
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 3
-train_llm_batch_size: 10
+max_round: 2
+k: 10
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+train_llm_batch_size: 5
 eval_llm_batch_size: 10
-max_train_epochs: 3
+max_train_epochs: 1
 num_exemplars: 1
 # debug: set num_worker=0, pin_memory=False
 ret_temperature: 0.1
@@ -47,7 +46,7 @@ cache_dir: cache
 adam_eps: 1.0e-8
 weight_decay: 0.0
 max_grad_norm: 2.0
-lr: 1.0e-5
+lr: 5.0e-6
 warmup_steps: 0
 seed: 19980406
 gradient_accumulation_steps: 1

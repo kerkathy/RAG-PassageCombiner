@@ -608,6 +608,8 @@ def main():
         train_size, dev_size = 50, 10
     elif args.data_size == "debug-fit-1":
         train_size, dev_size = 100, 100
+    elif args.data_size == "tune_hp":
+        train_size, dev_size = 1000, 100
     elif args.data_size == "1/10":
         train_size, dev_size = 10000, 1000
     elif args.data_size == "full":

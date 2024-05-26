@@ -3,7 +3,7 @@
 import json,os
 import types
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
@@ -117,21 +117,21 @@ class Index:
     def save(self):
         if self.train_doc_embeddings is not None:
             if os.path.exists(self.args.train_index_path):
-                print(f"File {self.args.train_index_path} already exists")
+                print(f"File {self.args.train_index_path} already exists. Not overwriting.")
             else:
                 torch.save(self.train_doc_embeddings, self.args.train_index_path)
                 print(f"Saved the train embeddings to {self.args.train_index_path}")
 
         if self.dev_doc_embeddings is not None:
             if os.path.exists(self.args.dev_index_path):
-                print(f"File {self.args.dev_index_path} already exists")
+                print(f"File {self.args.dev_index_path} already exists. Not overwriting.")
             else:
                 torch.save(self.dev_doc_embeddings, self.args.dev_index_path)
                 print(f"Saved the dev embeddings to {self.args.dev_index_path}")
 
         if self.empty_doc_embedding is not None:
             if os.path.exists(self.empty_doc_embedding_path):
-                print(f"File {self.empty_doc_embedding_path} already exists")
+                print(f"File {self.empty_doc_embedding_path} already exists. Not overwriting.")
             else:
                 torch.save(self.empty_doc_embedding, self.empty_doc_embedding_path)
                 print(f"Saved the empty embeddings to {self.args.empty_doc_embedding_path}")
@@ -157,14 +157,6 @@ if __name__ == '__main__':
     yaml_config = get_yaml_file(config_file)
     args_dict = {}
     args_dict['config_file'] = config_file
-
-    # new args
-    args_dict["on_train"] = False
-    args_dict["on_dev"] = True
-    args_dict["train_k"] = 500
-    args_dict["dev_k"] = 100
-    args_dict["extract"] = True
-    args_dict["normalize"] = True
 
     yaml_config.update(args_dict)
     args = types.SimpleNamespace(**yaml_config)

@@ -10,3 +10,11 @@ dev_index_path: embeddings/dpr/dev_1000.pt # embeddings/dpr/dev_1000.pt
 empty_doc_embedding_path: embeddings/dpr/empty_doc.pt
 gold_dev_answers_path: results/nq-dev-answers.json
 seed: 19980406
+
+# preprocess option
+on_train: True
+on_dev: False
+extract: True
+train_k: 1000
+dev_k: 
+normalize: True
