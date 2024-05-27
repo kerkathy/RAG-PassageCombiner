@@ -6,7 +6,6 @@ dev_file: formatted-ms2.nq-dev.json
 dataset_name: nq
 empty_doc: False
 data_size: "tune_hp"
-index_is_normed: True
 gold_dev_answers_path: results/nq-dev-answers.json
 ckpt_dir: ckpt
 sweep: False

@@ -634,12 +634,10 @@ def main():
 
     index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
     index_path = {
-        "train": os.path.join(index_dir, f"train_{train_size}.pt"),
-        "dev": os.path.join(index_dir, f"dev_{dev_size}.pt"),
-        "empty_doc": os.path.join(index_dir, "empty_doc.pt")
+        "train": os.path.join(index_dir, f"train_{train_size}_norm.pt"),
+        "dev": os.path.join(index_dir, f"dev_{dev_size}_norm.pt"),
+        "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
-    if args.index_is_normed:
-        index_path = {split: path.replace(".pt", "_norm.pt") for split,path in index_path.items()}
 
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 
@@ -655,14 +653,13 @@ def main():
             if not os.path.exists(path):
                 raise ValueError(f"{split} Index file {path} not found. Please prepcoess_idx.py first.")
 
-    # if normed, check if the norm is correct
-    if args.index_is_normed:
-        for split, emb_list in doc_embeddings.items():
-            # only check the first one
-            print("Checking norm of ", split)
-            emb = emb_list[0] if split != "empty_doc" else emb_list
-            print(f"Shape: {emb.shape}")
-            assert torch.allclose(torch.sum(emb**2, dim=-1), torch.ones(emb.shape[0]), atol=1e-5), f"Norm of {split} is not correct. Shape: {emb.shape}. Norm: {torch.sum(emb**2, dim=1)}"
+    # check if the norm is correct
+    for split, emb_list in doc_embeddings.items():
+        # only check the first one
+        print("Checking norm of ", split)
+        emb = emb_list[0] if split != "empty_doc" else emb_list
+        print(f"Shape: {emb.shape}")
+        assert torch.allclose(torch.sum(emb**2, dim=-1), torch.ones(emb.shape[0]), atol=1e-5), f"Norm of {split} is not correct. Shape: {emb.shape}. Norm: {torch.sum(emb**2, dim=1)}"
 
     # take the [args.num_exemplars:] 
     train_data = train_data[args.num_exemplars:]
@@ -807,7 +804,7 @@ def main():
                     # logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     
                     # shape of both query_embedding and doc_embedding: [bs,n_dim]
-                    # where bs = n_comb * num_orig_question
+                    # where bs = n_comb * num_orig_questionS
                     single_device_query_num,_ = query_embedding.shape
                     single_device_doc_num = doc_embedding.shape[0]
 
