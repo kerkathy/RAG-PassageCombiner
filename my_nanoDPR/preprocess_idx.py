@@ -44,12 +44,18 @@ class Index:
         """
         Choose to create the index for train or dev data or both
         """
+        if not train and not dev and not empty:
+            return
         if "dpr" == self.args.encoder_type:
-            ret_tokenizer = DPRContextEncoderTokenizer.from_pretrained(self.args.retriever_model)
-            doc_encoder = DPRContextEncoder.from_pretrained(self.args.retriever_model)
+            ret_tokenizer = DPRContextEncoderTokenizer.from_pretrained(self.args.retriever_model, cache_dir=self.args.cache_dir)
+            doc_encoder = DPRContextEncoder.from_pretrained(self.args.retriever_model, cache_dir=self.args.cache_dir)
         else:
-            ret_tokenizer = BertTokenizer.from_pretrained(self.args.retriever_model)
-            doc_encoder = BertModel.from_pretrained(self.args.retriever_model, add_pooling_layer=False)
+            ret_tokenizer = BertTokenizer.from_pretrained(self.args.retriever_model, cache_dir=self.args.cache_dir)
+            doc_encoder = BertModel.from_pretrained(self.args.retriever_model, add_pooling_layer=False, cache_dir=self.args.cache_dir)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        doc_encoder.to(device)
+        doc_encoder.eval()
 
         if train:
             print(f"...Loading data from {self.args.train_file}...")
@@ -72,7 +78,6 @@ class Index:
         if empty:
             self.empty_doc_embedding = make_index(["[UNK]"], ret_tokenizer, doc_encoder).squeeze()
             print(f"Empty doc embedding calculated")
-
 
     def read(self, train=False, dev=False, empty=False):
         if train:
