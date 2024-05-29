@@ -119,7 +119,15 @@ def calculate_nll_loss(
     # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
     doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
     seq_logprobs = seq_probs.log()
+    # special handling: if any row has -inf, replace it with smallest float
+    # if this isn't handled, loss will go to inf -> exploding gradient
+    seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
     nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
+    if nll_loss.isnan():
+        global logger
+        logger.warning("nll_loss is nan!")
+        logger.info(f"doc_logprobs: {doc_logprobs}")
+        logger.info(f"seq_logprobs: {seq_logprobs}")
     return nll_loss
 
 class QADataset(torch.utils.data.Dataset):
@@ -134,10 +142,7 @@ class QADataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         data = [self.qa_pairs[idx]]  # each item is (query, all_doc, answer, last_doc_embedding, qid)
         corpus = self.all_corpus[idx]
-        doc_embeddings = self.all_doc_embeddings[idx]  # Move to correct device
-        # debug
-        # print(f"{idx}th data len(corpus): {len(corpus)}")
-        # print(f"{idx}th data doc_embeddings.shape: {doc_embeddings.shape}")
+        doc_embeddings = self.all_doc_embeddings[idx]
         return {"data": data, "corpus": corpus, "doc_embeddings": doc_embeddings}
     
     def collate_fn(self, samples):
@@ -438,12 +443,6 @@ def validate(
             # ## Metric 3. Exact match
             # reshape batch['prompt_ans_lm_inputs'] to [n_question,n_comb,n_dim]
             # %%
-            # # debug: check if the picked one is really the same as the max one
-            # for i in range(batch['prompt_ans_lm_inputs']['input_ids'].shape[0] // num_orig_question):
-            #     tmp_str = lm_tokenizer.decode(batch['prompt_ans_lm_inputs']['input_ids'][i], skip_special_tokens=True)
-            #     logger.debug(f"{i}th option: {tmp_str}")
-            # logger.debug(f"Picked retrievers_pick idx: {retrievers_pick[0]}")
-
             logger.debug(f'batch["prompt_ans_lm_inputs"]["input_ids"].shape: {batch["prompt_ans_lm_inputs"]["input_ids"].shape}')
             n_comb = batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] // num_orig_question
             logger.debug(f"n_comb: {n_comb}")
@@ -541,7 +540,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) ({args.empty_doc} empty) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type})"}}
+                f"({args.dataset_name} {args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -549,7 +548,7 @@ def main():
         LOG_DIR = wandb_tracker.run.dir
         if args.sweep:
             # exit if folder already exists
-            CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
+            CKPT_DIR = os.path.join(args.ckpt_dir, f"train-lr-{args.lr}")
             if os.path.exists(CKPT_DIR):
                 logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
                 return
@@ -561,12 +560,12 @@ def main():
         if not args.resume_training:
             wandb_tracker.run.tags = [
                 f"size: {args.data_size}", f"lm: {args.lm_model}", f"loss: {args.loss_type}",
-                f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
+                f"query_enc: {args.query_encoder}", 
                 f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
                 f"empty_doc: {args.empty_doc}",
-                "cossim_ret_score (correct)"
+                "cossim_ret_score (correct)", "fix loss nan"
             ]
         else:
             # make sure current param is the same as the resumed one
@@ -827,10 +826,11 @@ def main():
                     retriever_cossim = retriever_cossim.reshape(num_orig_question, -1)
                     # logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
 
-                    query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
-                    del query_embedding, doc_embedding
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                    # need to be removed when debug NaN
+                    # query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
+                    # del query_embedding, doc_embedding
+                    # torch.cuda.empty_cache()
+                    # gc.collect()
                     # logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
                     # very likely to OOM error here
@@ -858,7 +858,7 @@ def main():
                             logger=logger,
                         )
                     # logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB. Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
-                    
+
                     if args.loss_type == "kl_div":
                         loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     elif args.loss_type == "rag":
@@ -866,6 +866,19 @@ def main():
                     else:
                         loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
                     logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+
+                    # check if loss is Nan
+                    if loss == float("inf") or loss == float("-inf") or torch.isnan(loss):
+                        logger.info(f"Loss is {loss}...")
+                        logger.info(f"query_embedding[0]: {query_embedding[0]}")
+                        logger.info(f"doc_embedding[0]: {doc_embedding[0]}")
+                        logger.info(f"num_orig_question: {num_orig_question}")
+                        logger.info(f"retriever_cossim[0]: {retriever_cossim[[0]]}")
+                        logger.info(f"query_embedding.shape: {query_embedding.shape}")
+                        logger.info(f"doc_embedding.shape: {doc_embedding.shape}")
+                        logger.info(f"retriever_cossim.shape: {retriever_cossim.shape}")
+                        logger.info(f"lm_prob: {lm_prob}")
+                        raise ValueError("Loss is Nan...")
 
                     retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
                     del retriever_cossim, lm_prob

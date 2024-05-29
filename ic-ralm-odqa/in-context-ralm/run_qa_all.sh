@@ -1,7 +1,7 @@
 set -e
 
 export CUDA_DEVICE_ORDER="PCI_BUS_ID"
-export CUDA_VISIBLE_DEVICES="3,5"
+export CUDA_VISIBLE_DEVICES="0"
 
 debug_mode=false
 
@@ -50,12 +50,12 @@ esac
 # corpus_name=wiki-web
 corpus_name=ms2
 dataset_path=reproduce_retrieval/result/${dataset_short_name}/formatted-${corpus_name}.${dataset_short_name}.hits-100.json
-output_dir="output_${corpus_name}_${dataset_short_name}_docs_${num_docs}"
+output_dir="flan_output_${corpus_name}_${dataset_short_name}_docs_${num_docs}"
 lambda_param=0.5
 threshold=1
 # model="meta-llama/Llama-2-7b-hf"
-model="huggyllama/llama-7b"
-# huggyllama/llama-7b
+model=google/flan-t5-large # note!!! I'm using flan!!
+# huggyllama/llama-7b, google/flan-t5-large
 
 print_and_run() {
     reranked_file=$1
@@ -95,7 +95,8 @@ if [ "$algo" = "mmr" ]; then
         print_and_run $reranked_file $reranked_output_dir
     done
 elif [ "$algo" = "basic" ]; then
-    for threshold in 0.5 0.6 0.7 0.8 0.9 1; do
+    for threshold in 1; do
+    # for threshold in 0.5 0.6 0.7 0.8 0.9 1; do
         reranked_file=${dataset_path/.json/-reranked-${method}-${threshold}.json}
         reranked_output_dir=${output_dir}/reranked_${method}-${threshold}
         if [ $threshold == 1 ]; then

@@ -29,7 +29,6 @@ def build_qa_prompt(example, num_docs=1, require_long=False, output_true_false=F
         q = normalize_question(example["question"])
         docs_text = "\n\n".join([ctx['text'] for ctx in example["ctxs"][:num_docs]])
         ex_prompt = f"""Given a question and a context, provide a Yes or No answer and explain why. If you are unsure, answer Unknown.
-
 #
 Context:
 {docs_text}
@@ -143,6 +142,9 @@ def evaluate_dataset(
         if "_id" in ex:
             id_pred_ans.append((ex["_id"], prediction, answers))
         else:
+            print(f"ID: idx, Prediction: {prediction}, Generation: {generation}, Answers: {answers}")
+            if is_correct:
+                print("Correct")
             id_pred_ans.append((idx, prediction, answers))
 
     em = num_correct / idx * 100
@@ -162,7 +164,7 @@ def evaluate_dataset(
         with open(os.path.join(output_dir, "gold_answers.json"), "w") as f:
             for item in id_pred_ans:
                 f.write(json.dumps({"query_id": item[0], "answers": item[2]}) + "\n")
-        
+
 
 def load_dataset(dataset_path):
     print("Loading dataset:", dataset_path)

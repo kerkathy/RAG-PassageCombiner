@@ -4,12 +4,18 @@
     # --multi_gpu \
 # accelerate launch --config_file {path/to/config/accelerate_config_file.yaml} \
 # {script_name.py} {--arg1} {--arg2} ...
-for i in {6..9}
-do
-    echo "Run $i th sweep"
-    accelerate launch \
-        --gpu_ids 0 \
-        train_dpr_test-fit.py \
-        --config_file "config/debug-24G_train_dr_nq copy $i.yaml"
-    echo "Done $ith sweep"
-done
+# i=1
+# # for i in {6..9}
+# # do
+#     echo "Run $i th sweep"
+#     accelerate launch \
+#         --gpu_ids 2 \
+#         train_dpr_test-fit.py \
+#         --config_file "config/debug-24G_train_dr_nq copy $i.yaml"
+#     echo "Done $i th sweep"
+# # done
+
+accelerate launch \
+    --gpu_ids 1 \
+    train_dpr_test-fit.py \
+    --config_file "config/debug-24G_train_dr_nq.yaml"

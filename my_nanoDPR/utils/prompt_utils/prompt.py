@@ -128,10 +128,10 @@ def make_prompt(question, documents, lm_name, num_exemplars, dataset):
         sys_prompt, formatted_prompt = sys_prompt.strip(), formatted_prompt.strip()
         return chat_prompt_template.format(SYS_PROMPT=sys_prompt, USER_PROMPT=formatted_prompt)
     
-    if dataset == "nq":
+    if dataset in ["nq", "hotpot", "trivia"]: # TODO create custom exemplars for hotpot and trivia
         exemplars = get_nq_exemplars(lm_name, num_docs, num_exemplars)
     else:
-        raise ValueError("dataset only support nq now.")
+        raise ValueError(f"dataset only support nq now but got {dataset}.")
     
     if num_docs == 0:
         return prompt_collection[lm_name]["no_doc"].format(

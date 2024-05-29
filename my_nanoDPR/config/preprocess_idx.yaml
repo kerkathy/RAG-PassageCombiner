@@ -1,15 +1,15 @@
 ## data
 train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-train/formatted-ms2.hotpot-train.size-1000.json
-# train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-train/formatted-ms2.hotpot-train.hits-100.json
-# dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-dev/formatted-ms2.hotpot-dev.size-100.json
-# dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot/formatted-ms2.hotpot.hits-100.json
-train_index_path: embeddings/trivia/dpr-multiset/train_1000_norm.pt # embeddings/dpr/train_10000.pt 
-dev_index_path: embeddings/trivia/dpr-multiset/dev_100_norm.pt # embeddings/dpr/dev_1000.pt 
-empty_index_path: embeddings/trivia/dpr-multiset/empty_doc_norm.pt
+dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-dev/formatted-ms2.hotpot-dev.size-100.json
+
+# target path
+train_index_path: embeddings/hotpot/contriever/train_1000_norm.pt # embeddings/dpr/train_10000.pt 
+dev_index_path: embeddings/hotpot/contriever/dev_100_norm.pt # embeddings/dpr/dev_1000.pt 
+empty_index_path: embeddings/hotpot/contriever/empty_doc_norm.pt
 
 ## training
-encoder_type: dpr # dpr, contriever, bert...
-retriever_model: facebook/dpr-ctx_encoder-multiset-base  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
+encoder_type: contriever # dpr, contriever, bert...
+retriever_model: facebook/contriever  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
 cache_dir: cache
 seed: 19980406
 
@@ -17,7 +17,7 @@ seed: 19980406
 on_train: True
 on_dev: True
 on_empty: True
-extract: True
-train_k: 50
-dev_k: 10
+extract: False
+train_k: 
+dev_k: 
 normalize: True

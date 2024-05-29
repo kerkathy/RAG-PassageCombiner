@@ -1,2 +1,4 @@
+cache/
+log/
 output*/
-
+data/*/*.json
