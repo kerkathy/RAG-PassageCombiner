@@ -116,6 +116,7 @@ def calculate_nll_loss(
     prob_y_given_x = doc similarity score * answer probability
     NLL = -log(prob_y_given_x)
     """
+    # version 1.
     # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
     doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
     seq_logprobs = seq_probs.log()
@@ -123,6 +124,12 @@ def calculate_nll_loss(
     # if this isn't handled, loss will go to inf -> exploding gradient
     seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
     nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
+
+    # version 2. (Turns out to be the same as version 1.)
+    # doc_probs = nn.functional.softmax(doc_scores, dim=1)
+    # seq_logprobs[seq_logprobs == 0] = seq_logprobs[seq_logprobs != 0].min() # for numerical stability
+    # nll_loss = -(doc_probs * seq_probs).log().sum(dim=1).mean()
+
     if nll_loss.isnan():
         global logger
         logger.warning("nll_loss is nan!")
@@ -540,7 +547,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.dataset_name} {args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
+                f"({args.dataset_name} {args.data_size}) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -564,8 +571,8 @@ def main():
                 f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
-                f"empty_doc: {args.empty_doc}",
-                "cossim_ret_score (correct)", "fix loss nan"
+                f"empty_doc: {args.empty_doc}", f"weight_decay: {args.weight_decay}",
+                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm"
             ]
         else:
             # make sure current param is the same as the resumed one
@@ -803,7 +810,7 @@ def main():
                     # logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
                     
                     # shape of both query_embedding and doc_embedding: [bs,n_dim]
-                    # where bs = n_comb * num_orig_questionS
+                    # where bs = n_comb * num_orig_question
                     single_device_query_num,_ = query_embedding.shape
                     single_device_doc_num = doc_embedding.shape[0]
 
@@ -931,6 +938,8 @@ def main():
                             
                         accelerator.wait_for_everyone()
                 
+                # gradient clip
+                accelerator.clip_grad_norm_(query_encoder.parameters(), args.max_grad_norm)
                 optimizer.step()
                 optimizer.zero_grad()
                 logger.info(f"[Finish step {step} in epoch {epoch} (globally {completed_steps})] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
