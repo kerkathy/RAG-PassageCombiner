@@ -3,7 +3,7 @@
 import json,os
 import types
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="3"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
@@ -46,10 +46,12 @@ class Index:
         """
         if not train and not dev and not empty:
             return
-        if "dpr" == self.args.encoder_type:
+        if "dpr" in self.args.encoder_type:
+            print("Using DPR model for document encoder")
             ret_tokenizer = DPRContextEncoderTokenizer.from_pretrained(self.args.retriever_model, cache_dir=self.args.cache_dir)
             doc_encoder = DPRContextEncoder.from_pretrained(self.args.retriever_model, cache_dir=self.args.cache_dir)
         else:
+            print("Using BERT model for document encoder")
             ret_tokenizer = BertTokenizer.from_pretrained(self.args.retriever_model, cache_dir=self.args.cache_dir)
             doc_encoder = BertModel.from_pretrained(self.args.retriever_model, add_pooling_layer=False, cache_dir=self.args.cache_dir)
 
