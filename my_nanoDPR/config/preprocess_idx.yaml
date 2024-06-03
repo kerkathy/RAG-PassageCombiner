@@ -1,23 +1,24 @@
 ## data
-train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-train/formatted-ms2.hotpot-train.size-1000.json
-dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-dev/formatted-ms2.hotpot-dev.size-100.json
+train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/trivia-train/formatted-ms2.trivia-train.size-50.json
+dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/trivia-dev/formatted-ms2.trivia-dev.size-10.json
 
 # target path
-train_index_path: embeddings/hotpot/contriever/train_1000_norm.pt # embeddings/dpr/train_10000.pt 
-dev_index_path: embeddings/hotpot/contriever/dev_100_norm.pt # embeddings/dpr/dev_1000.pt 
-empty_index_path: embeddings/hotpot/contriever/empty_doc_norm.pt
+train_index_path: embeddings/trivia/dpr-multiset/train_50_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
+dev_index_path: embeddings/trivia/dpr-multiset/dev_10_norm.pt # embeddings/dpr/dev_1000.pt  dpr-multiset
+empty_index_path: embeddings/trivia/dpr-multiset/empty_doc.pt
 
 ## training
-encoder_type: contriever # dpr, contriever, bert...
-retriever_model: facebook/contriever  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
+encoder_type: dpr-multiset # dpr, contriever, bert, dpr-multiset
+retriever_model: facebook/dpr-ctx_encoder-multiset-base  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
 cache_dir: cache
 seed: 19980406
 
 # preprocess option
 on_train: True
-on_dev: True
-on_empty: True
+on_dev: False
+on_empty: False
 extract: False
 train_k: 
 dev_k: 
-normalize: True
+normalize: False
+keep_has_positive_data: False
