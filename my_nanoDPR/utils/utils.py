@@ -1,5 +1,23 @@
 import torch
 import yaml,os
+import re,string
+
+def normalize_answer(s):
+    def remove_articles(text):
+        return re.sub(r"\b(a|an|the)\b", " ", text)
+
+    def white_space_fix(text):
+        return " ".join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation + '▶')
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
 def ensure_directory_exists_for_file(file_path):
     dir_path = os.path.dirname(file_path)
     if not os.path.isdir(dir_path):
@@ -67,7 +85,8 @@ def get_linear_scheduler(
 def get_sentence_embedding(doc, tokenizer, model):
     inputs = tokenizer(doc, return_tensors='pt', truncation=True, padding=True)
     inputs = {name: tensor.to(model.device) for name, tensor in inputs.items()}
-    outputs = model(**inputs)
+    with torch.no_grad():
+        outputs = model(**inputs)
     if "dpr" == model.config.model_type:
         embeddings = outputs.pooler_output
     else:
@@ -83,27 +102,35 @@ def make_index(corpus, tokenizer, encoder, batch_size=32):
         * doc_embeddings (torch.Tensor): Document embeddings
     """
     embeddings_list = []
-    with torch.no_grad():
-        for i in range(0, len(corpus), batch_size):
-            batch = [normalize_document(doc) for doc in corpus[i:i+batch_size]]
-            embeddings = get_sentence_embedding(batch, tokenizer, encoder)
-            embeddings_list.extend(embeddings.tolist())
+    for i in range(0, len(corpus), batch_size):
+        batch = [normalize_document(doc) for doc in corpus[i:i+batch_size]]
+        embeddings = get_sentence_embedding(batch, tokenizer, encoder)
+        embeddings_list.extend(embeddings.tolist())
     return torch.tensor(embeddings_list)
 
-def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k):
+def retrieve_top_k_docid(query, doc_embeddings, tokenizer, query_encoder, k, ids_to_exclude):
     """
     Compute cosine similarity between query and documents in the doc_index
     return top k documents
     """
-    query_embedding = get_sentence_embedding(query, tokenizer, query_encoder)  
-    # query_embedding, doc_embeddings = query_embedding.to(device), doc_embeddings.to(device)
-    # query_embedding, doc_embeddings = accelerator.prepare(query_embedding), accelerator.prepare(doc_embeddings) # this line cause error: device mismatch with one on cpu and one on cuda
-    # print(f"query_embedding at {query_embedding.device}; doc_embeddings at {doc_embeddings.device}")
-    # query_embedding = query_embedding.to(doc_embeddings.device)
-    doc_embeddings = doc_embeddings.to(query_embedding.device)
-    scores = torch.nn.functional.cosine_similarity(query_embedding, doc_embeddings, dim=1)
-    top_doc_scores, top_doc_indices = torch.topk(scores, k)
-    top_doc_indices = top_doc_indices.flatten().tolist()
-    # cache[query] = top_doc_indices
+    with torch.no_grad():
+        query_embedding = get_sentence_embedding(query, tokenizer, query_encoder)  
+        scores = torch.nn.functional.cosine_similarity(query_embedding, doc_embeddings, dim=1) # [num_docs]
+        scores[ids_to_exclude] = -2 # set to a very small value
+        top_doc_scores, top_doc_indices = torch.topk(scores, k)
+        top_doc_indices = top_doc_indices.flatten().tolist()
 
     return top_doc_indices
+
+def get_positive_docid(answer, corpus):
+    """
+    From corpus, filter out the documents that contain the answer to the query
+    return top k documents
+    """
+    positive_docid = []
+    for i, doc in enumerate(corpus):
+        if normalize_answer(answer) in normalize_document(doc).lower():
+            positive_docid.append(i)
+    if len(positive_docid) == 0:
+        return []
+    return positive_docid

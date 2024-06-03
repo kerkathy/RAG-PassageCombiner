@@ -5,12 +5,6 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from collections import Counter
 
-def normalize_question(question):
-    if not question.endswith("?"):
-        question = question + "?"
-
-    return question[0].lower() + question[1:]
-
 # %%
 def normalize_answer(s):
     def remove_articles(text):
