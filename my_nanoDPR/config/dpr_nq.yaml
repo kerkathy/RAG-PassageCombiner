@@ -1,0 +1,51 @@
+## data
+train_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train
+dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev
+train_file: formatted-ms2.nq-train.json
+dev_file: formatted-ms2.nq-dev.json
+dataset_name: nq
+empty_doc: False
+data_size: "full"
+ckpt_dir: ckpt
+sweep: False
+
+## model
+resume_training: 
+resume_path:
+resume_wandb_id:
+doc_encoder_type: dpr # dpr, contriever, bert...
+query_encoder_type: dpr # dpr, contriever, bert...
+base_index_dir: embeddings
+# query_encoder: wandb/run-20240513_225200-ja1uhk3w/files/step-2506/query_encoder/
+query_encoder: facebook/dpr-question_encoder-single-nq-base # facebook/contriever , facebook/dpr-question_encoder-single-nq-base , google-bert/bert-base-uncased
+lm_model: google/flan-t5-large
+# gpt2, google/flan-t5-large, huggyllama/llama-7b, meta-llama/Meta-Llama-3-8B-Instruct
+quantized: False
+model_parallelism: False
+## training
+loss_type: "rag" # kl_div, ce, rag
+max_round: 2
+k: 5
+num_train_positive: 1
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 6
+train_llm_batch_size: 5
+eval_llm_batch_size: 13
+max_train_epochs: 1
+num_exemplars: 1
+# debug: set num_worker=0, pin_memory=False
+ret_temperature: 0.1
+lm_temperature: 0.1
+val_check_interval: 0.2
+weight_decay: 0.0
+num_workers: 4
+pin_memory: True
+auth_token: None
+cache_dir: cache
+adam_eps: 1.0e-8
+max_grad_norm: 2.0
+lr: 1.0e-5
+warmup_steps: 0
+seed: 19980406
+gradient_accumulation_steps: 1
+max_tokens_to_generate: 10
