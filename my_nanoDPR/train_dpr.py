@@ -652,6 +652,15 @@ def main():
             train_size, dev_size = 90447, 7405
         else: 
             raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
+    elif args.data_size == "full_train_part_dev":
+        if args.dataset_name == "nq":
+            train_size, dev_size = 79168, 1000
+        elif args.dataset_name == "trivia":
+            train_size, dev_size = 87622, 1000
+        elif args.dataset_name == "hotpot":
+            train_size, dev_size = 90447, 1000
+        else: 
+            raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.train_file = args.train_file.replace(".json", f".size-{train_size}.json")
