@@ -33,7 +33,7 @@ from utils import (
     make_index,
 )
 
-from utils import normalize_query, get_positive_docid
+from utils import get_positive_docid
 
 def read_data(file):
     print(f"...Loading data from {file}...")
@@ -48,15 +48,18 @@ def create_corpus(data):
     return corpus
 
 def save_if_not_exists(data, var_name, path):
+    if data is None:
+        return
     if os.path.exists(path):
         print(f"File {path} already exists. Not overwriting.")
-    else:
-        if path.endswith(".pt"):
-            torch.save(data, path)
-        elif path.endswith(".json"):
-            with open(path, "w") as f:
-                json.dump(data, f, indent=4)
-        print(f"Saved the {var_name} to {path}")
+        return
+    
+    if path.endswith(".pt"):
+        torch.save(data, path)
+    elif path.endswith(".json"):
+        with open(path, "w") as f:
+            json.dump(data, f, indent=4)
+    print(f"Saved the {var_name} to {path}")
 
 class Index:
     def __init__(self, args):
@@ -152,7 +155,7 @@ class Index:
         save_if_not_exists(self.empty_doc_embedding, "empty_doc_embedding", self.args.empty_index_path)
         save_if_not_exists(self.train_data, "train_data", self.args.train_file)
 
-    def process_and_save(self):
+    def process_index_and_save(self):
         action = {}
         if self.args.on_train:
             action["train"] = "read" if os.path.exists(self.args.train_index_path) else "create"
@@ -170,40 +173,58 @@ class Index:
             self.normalize()
         self.save_all()
 
-    def keep_has_positive_data(self):
+    def rm_all_neg(self):
         # read data
-        train_qa_pairs = [(normalize_query(sample['question']), [-1], [sample['answers'][0]]) for sample in self.train_data]
+        train_answers = [sample['answers'] for sample in self.train_data]
         train_corpus = create_corpus(self.train_data)
+        train_all_pos_doc_ids = []
+        has_positive_data_idx = [] # save idx of only the data that has positive doc
 
-        # get positive doc ids for each question and save result
-        train_all_pos_doc_ids = [get_positive_docid(qa_pair[-1][0], corpus) for qa_pair, corpus in zip(train_qa_pairs, train_corpus)]
         # TODO consider all answers, and sort the answers by how many times they appear in the data
-        has_postivie_qids = [i for i, docids in enumerate(train_all_pos_doc_ids) if len(docids) > 0]
+        # then keep only the answer that has the most positive docs
+        # TODO DEBUG!!
+        for qid, (answers, corpus) in enumerate(zip(train_answers, train_corpus)):
+            max_positive_num = 0
+            max_positive_idx = 0
+            max_positive_ans_ids = []
+            for ans_id, ans_item in enumerate(answers):
+                ans_doc_ids = get_positive_docid(ans_item, corpus)
+                if len(ans_doc_ids) > max_positive_num:
+                    max_positive_num = len(ans_doc_ids)
+                    max_positive_ans_ids = ans_doc_ids
+                    max_positive_idx = ans_id
+            if max_positive_num > 0:
+                train_all_pos_doc_ids.append(max_positive_ans_ids)
+                train_answers[qid] = [answers[max_positive_idx]]
+                has_positive_data_idx.append(qid)
+            else:
+                train_answers[qid] = []
+                train_all_pos_doc_ids.append([])
 
+        print(f"[Filtered positive docs] len(has_positive_data_idx): {len(has_positive_data_idx)}")
+        print(f"[Filtered positive docs] len(train_all_pos_doc_ids): {len(train_all_pos_doc_ids)}")
+        assert len(train_all_pos_doc_ids) == len(train_answers) == len(train_corpus), f"len(train_all_pos_doc_ids): {len(train_all_pos_doc_ids)}, len(train_answers): {len(train_answers)}, len(train_corpus): {len(train_corpus)} Mismatch! Should be same"
+        
         # filter out the data that has no positive doc
-        self.train_doc_embeddings = [self.train_doc_embeddings[i] for i in has_postivie_qids]
+        self.train_doc_embeddings = [self.train_doc_embeddings[i] for i in has_positive_data_idx]
         self.train_data = [
             {
-                "question": data["question"],
-                "answers": data["answers"],
-                "ctxs": data["ctxs"],
+                "question": self.train_data[i]["question"],
+                "answers": train_answers[i],
+                "ctxs": self.train_data[i]["ctxs"],
                 "all_pos_doc_ids": train_all_pos_doc_ids[i]
             }
-            for i, data in enumerate(self.train_data) if i in has_postivie_qids
+            for i in has_positive_data_idx
         ]
-        print(f"[Filtered positive docs] len(train_qa_pairs): {len(train_qa_pairs)}")
-        print(f"[Filtered positive docs] len(train_corpus): {len(train_corpus)}")
-        print(f"[Filtered positive docs] len(self.train_doc_embeddings): {len(self.train_doc_embeddings)}")
-        print(f"[Filtered positive docs] len(train_all_pos_doc_ids): {len(train_all_pos_doc_ids)}")
 
-        self.args.train_index_path = self.args.train_index_path.replace(".pt", "_filtered_positive_docs.pt")
-        self.args.train_file = self.args.train_file.replace(".json", "_filtered_positive_docs.json")
+        self.args.train_index_path = self.args.train_index_path.replace(".pt", "_all_neg_removed.pt")
+        self.args.train_file = self.args.train_file.replace(".json", "_all_neg_removed.json")
         self.save_all()
 
-    def process_keep_has_positive_data(self):
+    def process_rm_all_neg(self):
         self.train_data = read_data(self.args.train_file)
         self.read_index(train=True, dev=False, empty=False)
-        self.keep_has_positive_data()
+        self.rm_all_neg()
 
 if __name__ == '__main__':
     config_file = 'config/preprocess_idx.yaml'
@@ -216,9 +237,9 @@ if __name__ == '__main__':
     set_seed(args.seed)
 
     index = Index(args)
-    if args.keep_has_positive_data:
+    if args.rm_all_neg:
         if not args.on_train or args.on_dev or args.on_empty or args.extract or args.normalize:
             raise ValueError("Keeping positive data is only done on training data. Please set on_train to True; on_dev, on_empty, extract and normalize to False")
-        index.process_keep_has_positive_data()
+        index.process_rm_all_neg()
     else:
-        index.process_keep_has_positive_data()
+        index.process_index_and_save()

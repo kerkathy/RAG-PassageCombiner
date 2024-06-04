@@ -27,14 +27,12 @@ from utils import (
     set_seed,
     get_linear_scheduler,
     normalize_query,
-    make_index,
     retrieve_top_k_docid,
     get_positive_docid,
     load_lm_model_and_tokenizer,
     get_lm_prob,
     get_t5_lm_prob,
     lm_gen_and_check,
-    load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
     make_prompt,
 )
@@ -144,7 +142,7 @@ class QADataset(torch.utils.data.Dataset):
         self.all_corpus = all_corpus
         self.all_doc_embeddings = all_doc_embeddings
         self.all_pos_doc_ids = all_pos_doc_ids
-        
+    
     def __len__(self):
         return len(self.qa_pairs)
 
@@ -180,7 +178,7 @@ def inloop_extend_item(data, corpus, doc_embeddings, pos_doc_ids, ret_tokenizer,
         query, _, _ = data[0]
         positive_embeddings = [doc_embeddings[i] for i in pos_doc_ids]
         positive_embeddings = torch.stack(positive_embeddings, dim=0)
-        topk_positive_ids = retrieve_top_k_docid(query, positive_embeddings, ret_tokenizer, query_encoder, args.num_train_positive, [])
+        topk_positive_ids = retrieve_top_k_docid(query, positive_embeddings, ret_tokenizer, query_encoder, args.num_train_positive_docs, [])
         topk_positive_ids = [pos_doc_ids[i] for i in topk_positive_ids]
     else:
         topk_positive_ids = []
@@ -597,7 +595,8 @@ def main():
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
                 f"empty_doc: {args.empty_doc}", f"weight_decay: {args.weight_decay}",
-                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", "only positive"
+                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", "only positive",
+                "most positive ans"
             ]
         else:
             # make sure current param is the same as the resumed one
@@ -665,6 +664,10 @@ def main():
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.train_file = args.train_file.replace(".json", f".size-{train_size}.json")
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
+    if args.has_positive_data_only:
+        logger.info("...Remove negative documents from train data...")
+        # only use data with positive documents to train
+        args.train_file = args.train_file.replace(".json", f"_all_neg_removed.json")
 
     logger.info("...Loading data...")
     # skip data used as exemplars
@@ -685,6 +688,9 @@ def main():
         "dev": os.path.join(index_dir, f"dev_{dev_size}_norm.pt"),
         "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
+    if args.has_positive_data_only:
+        logger.info("...Remove negative documents from train index...")
+        index_path["train"] = index_path["train"].replace(".pt", "_all_neg_removed.pt")
 
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 
@@ -717,10 +723,6 @@ def main():
     doc_embeddings['dev'] = doc_embeddings['dev'][args.num_exemplars:]
 
     # TODO add feature of empty doc representation
-
-    # Answer is a LIST instead of a str
-    # In train set, only select one answer for each question
-    # In dev set, keep track of full answer list of each question
     
     # TODO update data tuple format, from doc list to docid list
     # convert to (query, docid_list, answer)
@@ -736,26 +738,21 @@ def main():
     logger.info(f"len(doc_embeddings['dev']): {len(doc_embeddings['dev'])}")
 
     # get positive doc ids for each question and save result
-    train_pos_doc_ids = [get_positive_docid(qa_pair[-1][0], corpus) for qa_pair, corpus in zip(train_qa_pairs, train_corpus)]
-    has_postivie_qids = [i for i, docids in enumerate(train_pos_doc_ids) if len(docids) > 0]
-    # filter out those don't have positive documents
-    train_qa_pairs = [train_qa_pairs[i] for i in range(len(train_qa_pairs)) if i in has_postivie_qids]
-    train_corpus = [train_corpus[i] for i in range(len(train_corpus)) if i in has_postivie_qids]
-    doc_embeddings['train'] = [doc_embeddings['train'][i] for i in has_postivie_qids]
-    train_pos_doc_ids = [train_pos_doc_ids[i] for i in has_postivie_qids]
+    train_all_pos_doc_ids = [sample["all_pos_doc_ids"] for sample in train_data]
     logger.info(f"[Filtered positive docs] len(train_qa_pairs): {len(train_qa_pairs)}")
     logger.info(f"[Filtered positive docs] len(train_corpus): {len(train_corpus)}")
     logger.info(f"[Filtered positive docs] len(doc_embeddings['train']): {len(doc_embeddings['train'])}")
-    logger.info(f"[Filtered positive docs] len(train_pos_doc_ids): {len(train_pos_doc_ids)}")
+    logger.info(f"[Filtered positive docs] len(train_all_pos_doc_ids): {len(train_all_pos_doc_ids)}")
 
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-    train_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train'], train_pos_doc_ids)
+    train_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train'], train_all_pos_doc_ids)
     dev_dataset = QADataset(dev_qa_pairs, dev_corpus, doc_embeddings['dev'])
     
     logger.info("...Deleting train_data and dev_data...")
     del train_data, dev_data
+    gc.collect()
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=args.per_device_train_batch_size,shuffle=True,collate_fn=train_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     dev_dataloader = torch.utils.data.DataLoader(dev_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=dev_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)

@@ -2,10 +2,12 @@
 train_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train
 dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev
 train_file: formatted-ms2.nq-train.json
+# train_file: formatted-ms2.nq-train.json
 dev_file: formatted-ms2.nq-dev.json
 dataset_name: nq
 empty_doc: False
-data_size: "full"
+data_size: "full_train_part_dev"
+has_positive_data_only: True
 ckpt_dir: ckpt
 sweep: False
 
@@ -26,7 +28,7 @@ model_parallelism: False
 loss_type: "rag" # kl_div, ce, rag
 max_round: 2
 k: 5
-num_train_positive: 1
+num_train_positive_docs: 1
 per_device_train_batch_size: 2
 per_device_eval_batch_size: 6
 train_llm_batch_size: 5

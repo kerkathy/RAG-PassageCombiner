@@ -4,11 +4,12 @@ dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_
 
 # target path
 train_index_path: embeddings/trivia/dpr-multiset/train_50_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
-dev_index_path: embeddings/trivia/dpr-multiset/dev_10_norm.pt # embeddings/dpr/dev_1000.pt  dpr-multiset
+# train_index_path: embeddings/hotpot/dpr-multiset/train_90447_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
+dev_index_path: embeddings/trivia/dpr-multiset/dev_7405.pt # embeddings/dpr/dev_1000.pt  dpr-multiset
 empty_index_path: embeddings/trivia/dpr-multiset/empty_doc.pt
 
 ## training
-encoder_type: dpr-multiset # dpr, contriever, bert, dpr-multiset
+encoder_type: dpr # dpr, contriever, bert, dpr-multiset
 retriever_model: facebook/dpr-ctx_encoder-multiset-base  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
 cache_dir: cache
 seed: 19980406
@@ -21,4 +22,4 @@ extract: False
 train_k: 
 dev_k: 
 normalize: False
-keep_has_positive_data: False
+rm_all_neg: True

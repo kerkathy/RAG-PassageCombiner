@@ -3,15 +3,13 @@
 # in cuda8, use gpu_ids 0 for first A6000, 1 for the latter A5000, 好像也不一定@@
     # --multi_gpu \
 # accelerate launch --config_file {path/to/config/accelerate_config_file.yaml} \
-# {script_name.py} {--arg1} {--arg2} ...
-# for i in 1 2
-# do
-#     accelerate launch \
-#         --gpu_ids 2 \
-#         train_dpr.py \
-#         --config_file "config/24G_train_dpr_nq.yaml"
-# done
+# {script_name.py} {--arg1} {--arg2} ..
+# every 10 min, check if embeddings/hotpot/dpr-multiset/dev_1000_norm.pt exists.
+# if so, start the below.
+
+# for dataset in hotpot trivia nq
+dataset=nq
 accelerate launch \
-    --gpu_ids 2 \
+    --gpu_ids 0 \
     train_dpr.py \
-    --config_file "config/train_dpr_hotpot.yaml"
+    --config_file "config/dpr_${dataset}.yaml"
