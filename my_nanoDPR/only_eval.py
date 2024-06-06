@@ -556,7 +556,7 @@ def main():
         wandb_tracker.run.log_code(".")
         wandb_tracker.run.tags = [
             f"size: {args.data_size}", f"lm: {args.lm_model}", 
-            f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
+            f"query_enc: {args.query_encoder}",
             f"max_round: {args.max_round}", f"k: {args.k}", 
             f"eval_bs: {args.per_device_eval_batch_size}",
             "newline_format_prompt",
