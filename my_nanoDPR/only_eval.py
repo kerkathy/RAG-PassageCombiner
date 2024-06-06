@@ -27,13 +27,11 @@ from utils import (
     set_seed,
     get_linear_scheduler,
     normalize_query,
-    make_index,
     retrieve_top_k_docid,
     load_lm_model_and_tokenizer,
     get_lm_prob,
     get_t5_lm_prob,
     lm_gen_and_check,
-    load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
     make_prompt,
 )
@@ -116,10 +114,25 @@ def calculate_nll_loss(
     prob_y_given_x = doc similarity score * answer probability
     NLL = -log(prob_y_given_x)
     """
+    # version 1.
     # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
     doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
     seq_logprobs = seq_probs.log()
+    # special handling: if any row has -inf, replace it with smallest float
+    # if this isn't handled, loss will go to inf -> exploding gradient
+    seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
     nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
+
+    # version 2. (Turns out to be the same as version 1.)
+    # doc_probs = nn.functional.softmax(doc_scores, dim=1)
+    # seq_logprobs[seq_logprobs == 0] = seq_logprobs[seq_logprobs != 0].min() # for numerical stability
+    # nll_loss = -(doc_probs * seq_probs).log().sum(dim=1).mean()
+
+    if nll_loss.isnan():
+        global logger
+        logger.warning("nll_loss is nan!")
+        logger.info(f"doc_logprobs: {doc_logprobs}")
+        logger.info(f"seq_logprobs: {seq_logprobs}")
     return nll_loss
 
 class QADataset(torch.utils.data.Dataset):
@@ -174,7 +187,14 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
 
             # Retrieve top k documents
             with torch.no_grad():
-                doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
+                doc_ids = retrieve_top_k_docid(
+                    doc_list[-1] + " " + query, 
+                    doc_embeddings, 
+                    ret_tokenizer, 
+                    query_encoder, 
+                    args.k,
+                    ids_to_exclude=[],
+                )
             # Append new data
             for docid in doc_ids:
                 new_doc_list = doc_list + [corpus[docid]]
@@ -274,7 +294,6 @@ def validate(
     logger.info(f"*** Start validation at {train_step_logdir.split('/')[-1]} ***")
     query_encoder.eval()
     language_model.eval()
-    total_loss = 0
     total_ans_prob = 0
     num_batches = len(dev_dataloader)
     all_retriever_pick = []
@@ -309,9 +328,9 @@ def validate(
         
         # %%
         with torch.no_grad():
-            ## Metric 1. Loss
+            ## Metric 1. Loss (X not need here when testing)
             query_embedding = query_encoder(**batch['query_inputs']).pooler_output \
-                if "dpr" in args.query_encoder \
+                if "dpr" in args.query_encoder_type \
                 else query_encoder(**batch['query_inputs']).last_hidden_state[:,0,:] # [bs,n_dim]
             doc_embedding = batch["doc_embeddings"]
             logger.info(f"[Sent to query encoder] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
@@ -372,15 +391,6 @@ def validate(
                 )
             # logger.info(f"[Got LM prob] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
             
-            if args.loss_type == "kl_div":
-                loss = calculate_KL_div_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
-            elif args.loss_type == "rag":
-                loss = calculate_nll_loss(doc_scores=retriever_cossim, seq_probs=lm_prob)
-            else:
-                loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
-            total_loss += loss.item()
-            logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
-
             ## Metric 2. Average answer probability
             # for each question, take idx of max retriever_cossim 
             # get its corresponding lm_prob
@@ -483,7 +493,6 @@ def validate(
         for item in all_predictions:
             f.write(item + "\n")
     final_result = {
-        "avg_loss": total_loss / len(dev_dataloader), # 這裡原本算錯啦! 應該以 batch 為單位才對
         "avg_prob": total_ans_prob / total_num_examples, # 這裡原本算錯啦! 原本是每個 batch 的 mean 加起來再除以 num_batches
         "exact_match (%)": total_num_correct / total_num_examples * 100,
         "too_long (%)": total_too_long / total_num_examples * 100,
@@ -501,6 +510,11 @@ def validate(
 def main():
     # %%
     args = parse_args()
+
+    # make sure the first checkpoint exists
+    first_ckpt = f"{args.ckpt_dir}/{args.runid_to_eval}/checkpoint-{args.eval_steps}.pt"
+    assert os.path.exists(first_ckpt), f"first checkpoint {first_ckpt} does not exist"
+
     set_seed(args.seed)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(
@@ -518,7 +532,6 @@ def main():
         model_short_name = "llama3"
     elif "llama" in args.lm_model.lower():
         model_short_name = "llama"
-    old_run_id = args.old_query_encoder_path.split("-")[-1]
     
     if args.resume_training:
         assert os.path.exists(args.resume_path), f"resume_path {args.resume_path} does not exist"
@@ -533,36 +546,26 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"(eval {old_run_id} {args.dataset_name} {args.data_size}) (lr {args.lr} warmup {args.warmup_steps}) ({args.empty_doc} empty) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type})"}}
+                f"(eval {args.runid_to_eval} {args.dataset_name} {args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_eval_batch_size})({args.eval_llm_batch_size}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         LOG_DIR = wandb_tracker.run.dir
-        if args.sweep:
-            # exit if folder already exists
-            CKPT_DIR = os.path.join(args.ckpt_dir, f"train-lr-{args.lr}")
-            if os.path.exists(CKPT_DIR):
-                logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
-                return
-        else:
-            CKPT_DIR = os.path.join(args.ckpt_dir, wandb_tracker.run.id)
-        os.makedirs(CKPT_DIR)
-        logger.info(f"Logging to {LOG_DIR}, create CKPT_DIR {CKPT_DIR}...")
+        logger.info(f"Logging to {LOG_DIR}...")
         wandb_tracker.run.log_code(".")
         wandb_tracker.run.tags = [
-            f"size: {args.data_size}", f"lm: {args.lm_model}", f"loss: {args.loss_type}",
+            f"size: {args.data_size}", f"lm: {args.lm_model}", 
             f"query_enc: {args.query_encoder}", f"doc_enc: {args.doc_encoder}", 
-            f"max_round: {args.max_round}", f"k: {args.k}", f"epoch: {args.max_train_epochs}", 
-            f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
-            f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
+            f"max_round: {args.max_round}", f"k: {args.k}", 
+            f"eval_bs: {args.per_device_eval_batch_size}",
+            "newline_format_prompt",
             f"empty_doc: {args.empty_doc}",
-            "cossim_ret_score (correct)",
-            f"id: {old_run_id}", "only_eval"
+            "cossim_ret_score (correct)", 
+            f"id: {args.runid_to_eval}", "only_eval"
         ]
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
-        CKPT_DIR = "./tmp_ckpt"
     
     # %%
     query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
@@ -595,11 +598,26 @@ def main():
     elif args.data_size == "1/10":
         train_size, dev_size = 10000, 1000
     elif args.data_size == "full":
-        train_size, dev_size = 79168, 8757
+        if args.dataset_name == "nq":
+            train_size, dev_size = 79168, 8757
+        elif args.dataset_name == "trivia":
+            train_size, dev_size = 87622, 11313
+        elif args.dataset_name == "hotpot":
+            train_size, dev_size = 90447, 7405
+        else: 
+            raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
+    elif args.data_size == "full_train_part_dev":
+        if args.dataset_name == "nq":
+            train_size, dev_size = 79168, 1000
+        elif args.dataset_name == "trivia":
+            train_size, dev_size = 87622, 1000
+        elif args.dataset_name == "hotpot":
+            train_size, dev_size = 90447, 1000
+        else: 
+            raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
-
     logger.info("...Loading data...")
     dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
     logger.info(f"Size of dev data: {len(dev_data)}")
@@ -675,25 +693,33 @@ def main():
         if not os.path.exists(steps_log_dir):
             os.makedirs(steps_log_dir)
         if completed_steps > 0:
-            # TODO fix error
-            args.query_encoder = f"{args.old_query_encoder_path}/files/step-{completed_steps}/query_encoder"
-        query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
+            # Load old query encoder ckpt
+            args.query_encoder = os.path.join(f"{args.ckpt_dir}/{args.runid_to_eval}", f"checkpoint-{completed_steps}.pt")
+            logger.info(f"...Loading old state_dict from ckpt {args.query_encoder}...")
+            state_dict = torch.load(args.query_encoder)
+            query_encoder.load_state_dict(state_dict["query_encoder"])
+            loaded_completed_steps = state_dict["completed_steps"]
+            assert loaded_completed_steps == completed_steps, f"loaded_completed_steps ({loaded_completed_steps}) != completed_steps ({completed_steps})"
+            logger.info(f"...State_dict at step {completed_steps} loaded to query_encoder, optimizer, lr_scheduler...")
+            # args.query_encoder = f"{args.old_query_encoder_path}/files/step-{completed_steps}/query_encoder"
+        # query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
+        # query_encoder.eval()
+        # query_encoder = accelerator.prepare(query_encoder)
+        # logger.info(f"query_encoder is on {query_encoder.device}")
+
         query_encoder.eval()
-        query_encoder = accelerator.prepare(query_encoder)
-        logger.info(f"query_encoder is on {query_encoder.device}")
-        loss = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
-        accelerator.log({"eval":loss}, step=completed_steps)
-        query_encoder = query_encoder.to("cpu")
-        del query_encoder
-        torch.cuda.empty_cache()
-        gc.collect()
+        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+        accelerator.log({"eval":eval_result}, step=completed_steps)
+        # query_encoder = query_encoder.to("cpu")
+        # del query_encoder
+        # torch.cuda.empty_cache()
+        # gc.collect()
 
     if accelerator.is_local_main_process:
         logger.info(f"max_ret_token_len: {max_ret_token_len}; max_lm_token_len: {max_lm_token_len}")
         logger.info(f"Time spent: {time.time() - start_time} seconds")
         logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
         logger.info("...!!Congrats!! Evaluation finished :) ...")
-        logger.info(f"Checkpoint saved to {CKPT_DIR}")
         if not debug:
             wandb_tracker.finish()
     
