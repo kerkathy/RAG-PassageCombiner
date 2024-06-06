@@ -1,25 +1,29 @@
 ## data
-train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/trivia-train/formatted-ms2.trivia-train.size-50.json
-dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/trivia-dev/formatted-ms2.trivia-dev.size-10.json
+train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train/formatted-ms2.nq-train.size-50.json
+dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev/formatted-ms2.nq-dev.size-10.json
+test_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.size-10.json
 
 # target path
-train_index_path: embeddings/trivia/dpr-multiset/train_50_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
 # train_index_path: embeddings/hotpot/dpr-multiset/train_90447_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
-dev_index_path: embeddings/trivia/dpr-multiset/dev_7405.pt # embeddings/dpr/dev_1000.pt  dpr-multiset
-empty_index_path: embeddings/trivia/dpr-multiset/empty_doc.pt
+train_index_path: embeddings/nq/dpr/debug_train_50.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
+dev_index_path: embeddings/nq/dpr/dev_10.pt # embeddings/dpr/dev_1000.pt  dpr
+test_index_path: embeddings/nq/dpr/test_10.pt # embeddings/dpr/dev_1000.pt  dpr
+empty_index_path: embeddings/nq/dpr/empty_doc.pt
 
 ## training
 encoder_type: dpr # dpr, contriever, bert, dpr-multiset
-retriever_model: facebook/dpr-ctx_encoder-multiset-base  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
+retriever_model: facebook/dpr-ctx_encoder-single-nq-base  # facebook/dpr-ctx_encoder-single-nq-base , facebook/contriever , google-bert/bert-base-uncased , facebook/dpr-ctx_encoder-multiset-base
 cache_dir: cache
 seed: 19980406
 
 # preprocess option
-on_train: True
+on_train: False
 on_dev: False
+on_test: True
 on_empty: False
 extract: False
 train_k: 
 dev_k: 
+test_k: 
 normalize: False
-rm_all_neg: True
+rm_all_neg: False
