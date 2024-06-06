@@ -540,6 +540,9 @@ def main():
     args = parse_args()
     if args.has_positive_data_only is False:
         raise NotImplementedError("has_positive_data_only must be True. If you want to use negative data, please run train_dpr_not_only_positive.py")
+    else:
+        if not args.most_positive_ans_only:
+            raise NotImplementedError("Current preprocessed file is most positive ans only. Please set most_positive_ans_only to True. Or preprocess to get 0th ans for each data.")
     set_seed(args.seed)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(
@@ -666,7 +669,7 @@ def main():
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.train_file = args.train_file.replace(".json", f".size-{train_size}.json")
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
-    if args.has_positive_data_only:
+    if args.most_positive_ans_only:
         logger.info("...Remove negative documents from train data...")
         # only use data with positive documents to train
         args.train_file = args.train_file.replace(".json", f"_all_neg_removed.json")
@@ -690,7 +693,7 @@ def main():
         "dev": os.path.join(index_dir, f"dev_{dev_size}_norm.pt"),
         "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
-    if args.has_positive_data_only:
+    if args.most_positive_ans_only:
         logger.info("...Remove negative documents from train index...")
         index_path["train"] = index_path["train"].replace(".pt", "_all_neg_removed.pt")
 

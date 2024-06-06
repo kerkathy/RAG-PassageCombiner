@@ -8,6 +8,7 @@ dataset_name: nq
 empty_doc: False
 data_size: "full_train_part_dev"
 has_positive_data_only: True
+most_positive_ans_only: True
 ckpt_dir: ckpt
 sweep: False
 

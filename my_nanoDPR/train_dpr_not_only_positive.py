@@ -27,13 +27,11 @@ from utils import (
     set_seed,
     get_linear_scheduler,
     normalize_query,
-    make_index,
     retrieve_top_k_docid,
     load_lm_model_and_tokenizer,
     get_lm_prob,
     get_t5_lm_prob,
     lm_gen_and_check,
-    load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
     make_prompt,
 )
@@ -118,7 +116,7 @@ def calculate_nll_loss(
     """
     # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
     doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
-    seq_logprobs = seq_probs.log() # TODO 看一下是不是不用 log
+    seq_logprobs = seq_probs.log()
     # special handling: if any row has -inf, replace it with smallest float
     # if this isn't handled, loss will go to inf -> exploding gradient
     seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
