@@ -540,9 +540,6 @@ def main():
     args = parse_args()
     if args.has_positive_data_only is False:
         raise NotImplementedError("has_positive_data_only must be True. If you want to use negative data, please run train_dpr_not_only_positive.py")
-    else:
-        if not args.most_positive_ans_only:
-            raise NotImplementedError("Current preprocessed file is most positive ans only. Please set most_positive_ans_only to True. Or preprocess to get 0th ans for each data.")
     set_seed(args.seed)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(
@@ -574,7 +571,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.dataset_name} {args.data_size}) ({args.has_positive_data_only} train_positive) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
+                f"({args.dataset_name} {args.data_size}) ({args.has_positive_data_only} train_positive {args.most_positive_ans_only} most) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -599,10 +596,9 @@ def main():
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
                 f"empty_doc: {args.empty_doc}", f"weight_decay: {args.weight_decay}",
-                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", f"only positive: {args.has_positive_data_only}",
+                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", 
+                f"only positive: {args.has_positive_data_only}", f"most positive ans: {args.most_positive_ans_only}",
             ]
-            if args.most_positive_ans_only:
-                wandb_tracker.run.tags.append("most positive ans")
         else:
             # make sure current param is the same as the resumed one
             # except for resume_training, resume_path, resume_wandb_id
@@ -663,16 +659,21 @@ def main():
             train_size, dev_size = 87622, 1000
         elif args.dataset_name == "hotpot":
             train_size, dev_size = 90447, 1000
-        else: 
+        else:
             raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.train_file = args.train_file.replace(".json", f".size-{train_size}.json")
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
+    logger.info("...Remove negative documents from train data...")
     if args.most_positive_ans_only:
-        logger.info("...Remove negative documents from train data...")
-        # only use data with positive documents to train
+        # hoose the most positive answer
         args.train_file = args.train_file.replace(".json", f"_all_neg_removed.json")
+        logger.info(f"train_file: {args.train_file}")
+    else:
+        # choose the first answer
+        args.train_file = args.train_file.replace(".json", f"_not_most_pos_all_neg_removed.json")
+        logger.info(f"train_file: {args.train_file}")
 
     logger.info("...Loading data...")
     # skip data used as exemplars
@@ -696,6 +697,9 @@ def main():
     if args.most_positive_ans_only:
         logger.info("...Remove negative documents from train index...")
         index_path["train"] = index_path["train"].replace(".pt", "_all_neg_removed.pt")
+    else:
+        logger.info("...Remove negative documents from train index...")
+        index_path["train"] = index_path["train"].replace(".pt", "_not_most_pos_all_neg_removed.pt")
 
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 

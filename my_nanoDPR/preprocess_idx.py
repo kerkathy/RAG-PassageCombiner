@@ -3,7 +3,7 @@
 import json,os
 import types
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="3"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
@@ -199,7 +199,13 @@ class Index:
 
     def rm_all_neg(self):
         # read data
-        train_answers = [sample['answers'] for sample in self.train_data]
+        if args.most_positive:
+            train_answers = [sample['answers'] for sample in self.train_data]
+        else:
+            # Choose only the first answer
+            train_answers = [[sample['answers'][0]] for sample in self.train_data]
+            self.args.train_index_path = self.args.train_index_path.replace(".pt", "_not_most_pos.pt")
+            self.args.train_file = self.args.train_file.replace(".json", "_not_most_pos.json")
         train_corpus = create_corpus(self.train_data)
         train_all_pos_doc_ids = []
         has_positive_data_idx = [] # save idx of only the data that has positive doc
@@ -271,7 +277,7 @@ if __name__ == '__main__':
     index = Index(args)
     if args.rm_all_neg:
         if not args.on_train or args.on_dev or args.on_empty or args.extract or args.normalize:
-            raise ValueError("Keeping positive data is only done on training data. Please set on_train to True; on_dev, on_empty, extract and normalize to False")
+            raise ValueError("Keeping positive data should utilize train embeddings that are already done. Please set on_train to True; on_dev, on_empty, extract and normalize to False")
         print("Removing all negative data from training data")
         index.process_rm_all_neg()
     else:

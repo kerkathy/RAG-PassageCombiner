@@ -1,13 +1,13 @@
 ## data
-train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train/formatted-ms2.nq-train.size-50.json
+train_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-train/formatted-ms2.nq-train.size-10000.json
 dev_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev/formatted-ms2.nq-dev.size-10.json
-test_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.size-10.json
+test_file: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test/formatted-ms2.nq-test.size-3610.json
 
 # target path
 # train_index_path: embeddings/hotpot/dpr-multiset/train_90447_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
-train_index_path: embeddings/nq/dpr/debug_train_50.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
+train_index_path: embeddings/nq/dpr/train_10000_norm.pt # embeddings/dpr/train_10000.pt  dpr-multiset, dpr-multiset-new
 dev_index_path: embeddings/nq/dpr/dev_10.pt # embeddings/dpr/dev_1000.pt  dpr
-test_index_path: embeddings/nq/dpr/test_10.pt # embeddings/dpr/dev_1000.pt  dpr
+test_index_path: embeddings/nq/dpr/test_3610_norm.pt # embeddings/dpr/dev_1000.pt  dpr
 empty_index_path: embeddings/nq/dpr/empty_doc.pt
 
 ## training
@@ -17,13 +17,14 @@ cache_dir: cache
 seed: 19980406
 
 # preprocess option
-on_train: False
+on_train: True
 on_dev: False
-on_test: True
+on_test: False
 on_empty: False
 extract: False
 train_k: 
 dev_k: 
 test_k: 
 normalize: False
-rm_all_neg: False
+rm_all_neg: True
+most_positive: False

@@ -36,7 +36,7 @@ from utils import (
     make_prompt,
 )
 
-debug = True # set log mode to debug, and stop wandb logging
+debug = False # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -408,28 +408,6 @@ def validate(
                 print(f"Retriever pick == LM pick? {retrievers_pick[i] == torch.argmax(lm_prob[i])}")
             # print(f"softmax retriever score: {F.softmax(retriever_cossim / args.ret_temperature,dim=1)}")
             
-            # print(f"lm_prob.shape: {lm_prob.shape}")
-            # debug_prompt_ans_lm_inputs = batch['prompt_ans_lm_inputs']['input_ids'].view(num_orig_question, -1, batch['prompt_ans_lm_inputs']['input_ids'].shape[-1])
-            # debug_prompt_ans_lm_token_type_ids = batch['prompt_ans_lm_inputs']['token_type_ids'].view(num_orig_question, -1, batch['prompt_ans_lm_inputs']['token_type_ids'].shape[-1])
-            # for i in range(num_orig_question):
-            #     print(f"softmax retriever score: {F.softmax(retriever_cossim[i] / 0.1, dim=0)}")
-            #     print(f"retriever_pick: {retrievers_pick[i]}")
-            #     print(f"orig lm prob: {lm_prob[i]}")
-            #     print(f"softmax lm prob: {F.softmax(lm_prob[i] / 0.1, dim=0)}")
-            #     print(f"token_type_ids: {debug_prompt_ans_lm_token_type_ids[i]}")
-            #     # decode each batch['prompt_ans_lm_inputs']
-            #     batch_decode_result = lm_tokenizer.batch_decode(debug_prompt_ans_lm_inputs[i], skip_special_tokens=True)
-            #     for j, decode_result in enumerate(batch_decode_result):
-            #         print(f"{j}th decoded: {decode_result}")
-            # print(f"lm_prob: {lm_prob}")
-            # print(f"softmax lm score: {F.softmax(lm_prob / args.lm_temperature,dim=1)}")
-
-            # # print(f"retrievers_pick: {retrievers_pick}")
-            # print(f"retrievers_pick.shape: {retrievers_pick.shape}")
-            # # decode each batch['prompt_ans_lm_inputs']
-            # print(f"lm score each question max: {lm_prob[torch.arange(num_orig_question),torch.argmax(lm_prob,dim=1)]}")
-            # print(f"retrievers pick lm score: {lm_prob[torch.arange(num_orig_question),retrievers_pick]}")
-            # # ### debug
             # %%
             total_num_correct_pick += (retrievers_pick == torch.argmax(lm_prob,dim=1)).sum().item()
             lm_prob = lm_prob[torch.arange(num_orig_question),retrievers_pick] # [n_question]
@@ -681,7 +659,6 @@ def main():
     logger.info(f"Doc encoder: {args.doc_encoder_type}")
 
     for completed_steps in range(0, args.max_eval_steps+1, args.eval_steps):
-    # for completed_steps in range(0, MAX_TRAIN_STEPS, EVAL_STEPS):
         logger.info(f"...{completed_steps} Step Evaluation...")
         steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
         if not os.path.exists(steps_log_dir):
@@ -699,10 +676,6 @@ def main():
         query_encoder.eval()
         eval_result = validate(query_tokenizer, query_encoder, language_model, test_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
         accelerator.log({"eval":eval_result}, step=completed_steps)
-        # query_encoder = query_encoder.to("cpu")
-        # del query_encoder
-        # torch.cuda.empty_cache()
-        # gc.collect()
 
     if accelerator.is_local_main_process:
         logger.info(f"max_ret_token_len: {max_ret_token_len}; max_lm_token_len: {max_lm_token_len}")
