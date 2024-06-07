@@ -36,7 +36,7 @@ from utils import (
     make_prompt,
 )
 
-debug = False # set log mode to debug, and stop wandb logging
+debug = True # set log mode to debug, and stop wandb logging
 max_ret_token_len = 0
 max_lm_token_len = 0
 
@@ -287,7 +287,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
 
 # %%
 def validate(
-        query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, 
+        query_tokenizer, query_encoder, language_model, test_dataloader, lm_tokenizer, args, 
         accelerator, model_max_length, train_step_logdir
 ):
     # %%
@@ -295,7 +295,7 @@ def validate(
     query_encoder.eval()
     language_model.eval()
     total_ans_prob = 0
-    num_batches = len(dev_dataloader)
+    num_batches = len(test_dataloader)
     all_retriever_pick = []
     all_predictions = []
     total_num_correct = 0
@@ -306,7 +306,7 @@ def validate(
     total_f1_score = 0
 
     # %%
-    for step, raw_batch in tqdm(enumerate(dev_dataloader)):
+    for step, raw_batch in tqdm(enumerate(test_dataloader)):
         # %%
         # make raw_batch into a extened batch by first extend each item and then collate_fn
         extended_batch = [inloop_extend_item(
@@ -546,7 +546,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"(eval {args.runid_to_eval} {args.dataset_name} {args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_eval_batch_size})({args.eval_llm_batch_size}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
+                f"(eval {args.runid_to_eval})({args.dataset_name} {args.data_size}) {model_short_name}-{args.max_round}round-{args.k}k-bs({args.per_device_eval_batch_size})({args.eval_llm_batch_size}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -590,55 +590,42 @@ def main():
     logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
     if args.data_size == "debug":
-        train_size, dev_size = 50, 10
-    elif args.data_size == "debug-fit-1":
-        train_size, dev_size = 100, 100
-    elif args.data_size == "tune_hp":
-        train_size, dev_size = 1000, 100
-    elif args.data_size == "1/10":
-        train_size, dev_size = 10000, 1000
+        test_size = 10
+    elif args.data_size == "1000":
+        test_size = 1000
     elif args.data_size == "full":
         if args.dataset_name == "nq":
-            train_size, dev_size = 79168, 8757
+            test_size = 3610
         elif args.dataset_name == "trivia":
-            train_size, dev_size = 87622, 11313
+            raise NotImplementedError("Trivia full size is not available.")
         elif args.dataset_name == "hotpot":
-            train_size, dev_size = 90447, 7405
-        else: 
-            raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
-    elif args.data_size == "full_train_part_dev":
-        if args.dataset_name == "nq":
-            train_size, dev_size = 79168, 1000
-        elif args.dataset_name == "trivia":
-            train_size, dev_size = 87622, 1000
-        elif args.dataset_name == "hotpot":
-            train_size, dev_size = 90447, 1000
+            raise NotImplementedError("Hotpot full size is not available.")
         else: 
             raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
-    args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
+    args.test_file = args.test_file.replace(".json", f".size-{test_size}.json")
     logger.info("...Loading data...")
-    dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
-    logger.info(f"Size of dev data: {len(dev_data)}")
+    test_data = json.load(open(os.path.join(args.test_dir, args.test_file)))
+    logger.info(f"Size of test data: {len(test_data)}")
 
     logger.info("...Creating Corpus...")
-    dev_corpus = [[x['text'] for x in sample['ctxs']] for sample in dev_data]
-    logger.info(f"Size of dev corpus: {len(dev_corpus)}")
+    test_corpus = [[x['text'] for x in sample['ctxs']] for sample in test_data]
+    logger.info(f"Size of test corpus: {len(test_corpus)}")
 
     index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
     index_path = {
-        "dev": os.path.join(index_dir, f"dev_{dev_size}_norm.pt"),
+        "test": os.path.join(index_dir, f"test_{test_size}_norm.pt"),
         "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
 
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 
         doc_embeddings = {
-            "dev": torch.load(index_path["dev"]),
+            "test": torch.load(index_path["test"]),
             "empty_doc": torch.load(index_path["empty_doc"])
         }
-        assert len(doc_embeddings['dev']) == len(dev_corpus), f"len(doc_embeddings['dev']) ({len(doc_embeddings['dev'])}) != len(dev_corpus), ({len(dev_corpus)})"
+        assert len(doc_embeddings['test']) == len(test_corpus), f"len(doc_embeddings['test']) ({len(doc_embeddings['test'])}) != len(test_corpus), ({len(test_corpus)})"
     else:
         for split, path in index_path.items():
             if not os.path.exists(path):
@@ -653,39 +640,46 @@ def main():
         assert torch.allclose(torch.sum(emb**2, dim=-1), torch.ones(emb.shape[0]), atol=1e-5), f"Norm of {split} is not correct. Shape: {emb.shape}. Norm: {torch.sum(emb**2, dim=1)}"
 
     # take the [args.num_exemplars:] 
-    dev_data = dev_data[args.num_exemplars:]
-    dev_corpus = dev_corpus[args.num_exemplars:]
-    doc_embeddings['dev'] = doc_embeddings['dev'][args.num_exemplars:]
+    test_data = test_data[args.num_exemplars:]
+    test_corpus = test_corpus[args.num_exemplars:]
+    doc_embeddings['test'] = doc_embeddings['test'][args.num_exemplars:]
 
     # TODO add feature of empty doc representation
 
     # Answer is a LIST instead of a str
-    # In train set, only select one answer for each question
-    # In dev set, keep track of full answer list of each question
-    dev_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'], doc_embeddings['empty_doc']) for sample in dev_data]
+    # In test set, keep track of full answer list of each question
+    test_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'], doc_embeddings['empty_doc']) for sample in test_data]
 
-    logger.info(f"len(dev_qa_pairs): {len(dev_qa_pairs)}")
-    logger.info(f"len(dev_corpus): {len(dev_corpus)}")
-    logger.info(f"len(doc_embeddings['dev']): {len(doc_embeddings['dev'])}")
+    logger.info(f"len(test_qa_pairs): {len(test_qa_pairs)}")
+    logger.info(f"len(test_corpus): {len(test_corpus)}")
+    logger.info(f"len(doc_embeddings['test']): {len(doc_embeddings['test'])}")
 
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, doc_embeddings['dev'])
+    test_dataset = QADataset(test_qa_pairs, test_corpus, doc_embeddings['test'])
     
-    logger.info("...Deleting train_data and dev_data...")
-    del dev_data
+    logger.info("...Deleting train_data and test_data...")
+    del test_data
 
-    dev_dataloader = torch.utils.data.DataLoader(dev_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=dev_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
+    test_dataloader = torch.utils.data.DataLoader(test_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=test_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     
     logger.info("...Prepare accelerator...")
-    dev_dataloader, language_model = accelerator.prepare(
-        dev_dataloader, language_model 
+    test_dataloader, language_model = accelerator.prepare(
+        test_dataloader, language_model 
     )
     logger.info(f"GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
     start_time = time.time()
-    
+
+    logger.info("\n***** Running testing *****")
+    logger.info(f"Test file: {args.test_file}")
+    logger.info(f"Embedding path: {index_path['test']} & {index_path['empty_doc']}")
+    logger.info(f"Test size: {args.data_size}")
+    logger.info(f"Model: {args.lm_model}")
+    logger.info(f"Query encoder: {args.query_encoder}")
+    logger.info(f"Doc encoder: {args.doc_encoder_type}")
+
     for completed_steps in range(0, args.max_eval_steps+1, args.eval_steps):
     # for completed_steps in range(0, MAX_TRAIN_STEPS, EVAL_STEPS):
         logger.info(f"...{completed_steps} Step Evaluation...")
@@ -701,14 +695,9 @@ def main():
             loaded_completed_steps = state_dict["completed_steps"]
             assert loaded_completed_steps == completed_steps, f"loaded_completed_steps ({loaded_completed_steps}) != completed_steps ({completed_steps})"
             logger.info(f"...State_dict at step {completed_steps} loaded to query_encoder, optimizer, lr_scheduler...")
-            # args.query_encoder = f"{args.old_query_encoder_path}/files/step-{completed_steps}/query_encoder"
-        # query_tokenizer, query_encoder = load_query_encoder_and_tokenizer(args, logger)
-        # query_encoder.eval()
-        # query_encoder = accelerator.prepare(query_encoder)
-        # logger.info(f"query_encoder is on {query_encoder.device}")
 
         query_encoder.eval()
-        eval_result = validate(query_tokenizer, query_encoder, language_model, dev_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
+        eval_result = validate(query_tokenizer, query_encoder, language_model, test_dataloader, lm_tokenizer, args, accelerator, model_max_length, steps_log_dir)
         accelerator.log({"eval":eval_result}, step=completed_steps)
         # query_encoder = query_encoder.to("cpu")
         # del query_encoder

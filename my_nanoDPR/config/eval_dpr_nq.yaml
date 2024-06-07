@@ -1,16 +1,14 @@
 ## data
-dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-dev
-# dev_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test
-dev_file: formatted-ms2.nq-dev.json
-# dev_file: formatted-ms2.nq-test.hits-100-debug.json
+test_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test
+test_file: formatted-ms2.nq-test.json
 dataset_name: nq
 empty_doc: False
-data_size: "debug"
+data_size: "1000"
 ckpt_dir: ckpt
-runid_to_eval: nazxhkuy # TODO
+runid_to_eval: cb1kll6d
 
-eval_steps: 242
-max_eval_steps: 1214
+eval_steps: 1900
+max_eval_steps: 9500
 
 ## model
 resume_training: 
@@ -18,7 +16,7 @@ resume_path:
 resume_wandb_id:
 doc_encoder_type: dpr # dpr, contriever, bert...
 query_encoder_type: dpr # dpr, contriever, bert...
-base_index_dir: embeddings
+base_index_dir: embeddings/nq
 # query_encoder: wandb/run-20240513_225200-ja1uhk3w/files/step-2506/query_encoder/
 query_encoder: facebook/dpr-question_encoder-single-nq-base # facebook/contriever , facebook/dpr-question_encoder-single-nq-base , google-bert/bert-base-uncased
 lm_model: google/flan-t5-large
@@ -39,12 +37,3 @@ cache_dir: cache
 seed: 19980406
 gradient_accumulation_steps: 1
 max_tokens_to_generate: 10
-# old_query_encoder_path: wandb/run-20240510_020643-s817q8kg
-# eval_steps: 2000
-# max_eval_steps: 10000
-# old_query_encoder_path: wandb/run-20240510_021133-xpwtaz9g
-# eval_steps: 2500
-# max_eval_steps: 12500
-# old_query_encoder_path: wandb/run-20240510_014412-ggch6mbr
-# eval_steps: 1000
-# max_eval_steps: 5000
