@@ -63,78 +63,6 @@ def parse_args():
     args = types.SimpleNamespace(**yaml_config) # access in attribute style
     return args
 
-# def calculate_dpr_loss(matching_score,labels):
-#     return F.nll_loss(input=F.log_softmax(matching_score,dim=1),target=labels)
-
-def calculate_KL_div_loss(
-    input_logits, # size [n_question,n_comb]
-    target_logits, # size [n_question,n_comb]
-    temperature, # [ret_temperature,lm_temperature]
-):
-    """
-    Calculate KL divergence loss between input and target logits
-    Note: input_logits and target_logits are logits, not distributions
-    """
-    global logger
-    # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
-    kl_loss = nn.KLDivLoss(reduction="batchmean")
-    loss = kl_loss(
-        F.log_softmax(input_logits / temperature[0], dim=1), # input should be a distribution in the log space
-        F.softmax(target_logits / temperature[1], dim=1),
-    )
-    return loss
-
-def calculate_cross_entropy_loss(
-    input_logits, # [n_question,n_comb]
-    target_logits, # [n_question,n_comb]
-    temperature, # [ret_temperature,lm_temperature]
-):
-    """
-    Calculate cross entropy loss between input and target logits
-    Take the argmax of target_logits as the label
-    """
-    global logger
-    # logger.debug(f"input_logits: {F.softmax(input_logits / temperature, dim=1)}")
-    # logger.debug(f"target_logits: {F.softmax(target_logits / temperature, dim=1)}")
-    ce_loss = nn.CrossEntropyLoss() # reduction is mean by default
-    input_logits = input_logits / temperature[0]
-    loss = ce_loss(
-        input=input_logits, # input is expected to contain the unnormalized logits for each class
-        target=torch.argmax(target_logits, dim=1),
-    )
-    return loss 
-
-def calculate_nll_loss(
-    doc_scores, # [n_question,n_comb]
-    seq_probs, # [n_question,n_comb]
-):
-    """
-    Following RAG paper, calculate negative log likelihood loss
-    prob_y_given_x = doc similarity score * answer probability
-    NLL = -log(prob_y_given_x)
-    """
-    # version 1.
-    # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
-    doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
-    seq_logprobs = seq_probs.log()
-    # special handling: if any row has -inf, replace it with smallest float
-    # if this isn't handled, loss will go to inf -> exploding gradient
-    seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
-    nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
-
-    # version 2. (Turns out to be the same as version 1.)
-    # doc_probs = nn.functional.softmax(doc_scores, dim=1)
-    # seq_logprobs[seq_logprobs == 0] = seq_logprobs[seq_logprobs != 0].min() # for numerical stability
-    # nll_loss = -(doc_probs * seq_probs).log().sum(dim=1).mean()
-
-    if nll_loss.isnan():
-        global logger
-        logger.warning("nll_loss is nan!")
-        logger.info(f"doc_logprobs: {doc_logprobs}")
-        logger.info(f"seq_logprobs: {seq_logprobs}")
-    return nll_loss
-
 class QADataset(torch.utils.data.Dataset):
     def __init__(self, qa_pairs, all_corpus, all_doc_embeddings):
         self.qa_pairs = qa_pairs
@@ -157,7 +85,6 @@ class QADataset(torch.utils.data.Dataset):
         return samples
 
 # this is like getitem, moved outside Dataset because we're using GPU here, and using GPU inside Dataset is not recommended
-# def inloop_getitem
 def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args):
     """
     Extend each item in data by retrieving top k documents for each round
@@ -541,6 +468,7 @@ def main():
             f"empty_doc: {args.empty_doc}",
             "cossim_ret_score (correct)", 
             f"id: {args.runid_to_eval}", "only_eval"
+            "test max step"
         ]
     else:
         LOG_DIR = "./tmp_log"  # Or any other directory you want to use when debugging
@@ -574,15 +502,20 @@ def main():
     elif args.data_size == "full":
         if args.dataset_name == "nq":
             test_size = 3610
-        elif args.dataset_name == "trivia":
-            raise NotImplementedError("Trivia full size is not available.")
-        elif args.dataset_name == "hotpot":
-            raise NotImplementedError("Hotpot full size is not available.")
+        elif args.dataset_name == "trivia" or args.dataset_name == "hotpot":
+            raise NotImplementedError(f"{args.dataset_name} full size is not available.")
         else: 
             raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
-    args.test_file = args.test_file.replace(".json", f".size-{test_size}.json")
+    
+    if args.dataset_name == "nq":
+        args.test_file = args.test_file.replace(".json", f".size-{test_size}.json")
+    elif args.dataset_name == "trivia":
+        args.test_file = args.test_file.replace(".json", f".size-11313.{test_size}-as-test.json")
+    elif args.dataset_name == "hotpot":
+        args.test_file = args.test_file.replace(".json", f".size-7405.{test_size}-as-test.json")
+
     logger.info("...Loading data...")
     test_data = json.load(open(os.path.join(args.test_dir, args.test_file)))
     logger.info(f"Size of test data: {len(test_data)}")
@@ -593,9 +526,14 @@ def main():
 
     index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
     index_path = {
-        "test": os.path.join(index_dir, f"test_{test_size}_norm.pt"),
         "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
+    if args.dataset_name == "trivia":
+        index_path["test"] = os.path.join(index_dir, f"dev_11313_norm_{test_size}_as_test.pt")
+    elif args.dataset_name == "hotpot":
+        index_path["test"] = os.path.join(index_dir, f"dev_7405_norm_{test_size}_as_test.pt")
+    else:
+        index_path["test"] = os.path.join(index_dir, f"test_{test_size}_norm.pt")
 
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 
@@ -658,7 +596,10 @@ def main():
     logger.info(f"Query encoder: {args.query_encoder}")
     logger.info(f"Doc encoder: {args.doc_encoder_type}")
 
-    for completed_steps in range(0, args.max_eval_steps+1, args.eval_steps):
+    steps_to_check = list(range(0, args.max_eval_steps, args.eval_steps)) # will not contain max_eval_steps
+    if args.max_eval_steps % args.eval_steps != 0:
+        steps_to_check.append(args.max_eval_steps)
+    for completed_steps in steps_to_check:
         logger.info(f"...{completed_steps} Step Evaluation...")
         steps_log_dir = os.path.join(LOG_DIR,f"step-{completed_steps}")
         if not os.path.exists(steps_log_dir):

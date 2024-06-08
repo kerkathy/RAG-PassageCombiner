@@ -1,31 +1,30 @@
 ## data
-test_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/nq-test
-test_file: formatted-ms2.nq-test.json
-dataset_name: nq
+test_dir: /home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/reproduce_retrieval/result/hotpot-test
+test_file: formatted-ms2.hotpot-dev.json
+dataset_name: hotpot
 empty_doc: False
 data_size: "1000"
 ckpt_dir: ckpt
-runid_to_eval: 2h3qn8x0
-
-eval_steps: 7916
-max_eval_steps: 39584
+runid_to_eval: slkvip7d
+eval_steps: 279
+max_eval_steps: 1399
+max_round: 2
+k: 5
 
 ## model
 resume_training: 
 resume_path:
 resume_wandb_id:
-doc_encoder_type: dpr # dpr, contriever, bert...
-query_encoder_type: dpr # dpr, contriever, bert...
-base_index_dir: embeddings/nq
+doc_encoder_type: dpr-multiset # dpr, contriever, bert...
+query_encoder_type: dpr-multiset # dpr, contriever, bert...
+base_index_dir: embeddings/hotpot
 # query_encoder: wandb/run-20240513_225200-ja1uhk3w/files/step-2506/query_encoder/
-query_encoder: facebook/dpr-question_encoder-single-nq-base # facebook/contriever , facebook/dpr-question_encoder-single-nq-base , google-bert/bert-base-uncased
+query_encoder: facebook/dpr-question_encoder-multiset-base # facebook/contriever , facebook/dpr-question_encoder-single-nq-base , google-bert/bert-base-uncased
 lm_model: google/flan-t5-large
 # gpt2, google/flan-t5-large, huggyllama/llama-7b, meta-llama/Meta-Llama-3-8B-Instruct
 quantized: False
 model_parallelism: False
 ## training
-max_round: 1
-k: 5
 per_device_eval_batch_size: 6 # 8 ok
 eval_llm_batch_size: 13
 num_exemplars: 1

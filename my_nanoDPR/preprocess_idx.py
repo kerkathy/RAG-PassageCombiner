@@ -1,9 +1,9 @@
 # %%
 ## built-in
 import json,os
-import types
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]="1"
+import types, random
 
 os.environ["TOKENIZERS_PARALLELISM"]='true'
 os.environ["WANDB_IGNORE_GLOBS"]='*.bin' ## not upload ckpt to wandb cloud
@@ -38,13 +38,13 @@ from utils import get_positive_docid
 def read_data(file):
     print(f"...Loading data from {file}...")
     data = json.load(open(file))
-    print(f"Size of train data: {len(data)}")
+    print(f"Finish! Size of train data: {len(data)}")
     return data
 
 def create_corpus(data):
     print("...Creating Corpus...")
     corpus = [[x['text'] for x in sample['ctxs']] for sample in data]
-    print(f"Size of corpus: {len(corpus)}")
+    print(f"Finish! Size of corpus: {len(corpus)}")
     return corpus
 
 def save_if_not_exists(data, var_name, path):
@@ -60,6 +60,12 @@ def save_if_not_exists(data, var_name, path):
         with open(path, "w") as f:
             json.dump(data, f, indent=4)
     print(f"Saved the {var_name} to {path}")
+
+def ensure_dir(file_path):
+    directory = os.path.dirname(file_path)
+    if not os.path.exists(directory):
+        print(f"Creating directory {directory}")
+        os.makedirs(directory)
 
 class Index:
     def __init__(self, args):
@@ -176,6 +182,8 @@ class Index:
         save_if_not_exists(self.test_doc_embeddings, "test_doc_embeddings", self.args.test_index_path)
         save_if_not_exists(self.empty_doc_embedding, "empty_doc_embedding", self.args.empty_index_path)
         save_if_not_exists(self.train_data, "train_data", self.args.train_file)
+        save_if_not_exists(self.dev_data, "dev_data", self.args.dev_file)
+        save_if_not_exists(self.test_data, "test_data", self.args.test_file)
 
     def process_index_and_save(self):
         action = {}
@@ -198,6 +206,11 @@ class Index:
         self.save_all()
 
     def rm_all_neg(self):
+        """
+        Remove all negative data from training data.
+        If most_positive is True, keep only the most positive answer.
+        Saves the new train data and train index.
+        """
         # read data
         if args.most_positive:
             train_answers = [sample['answers'] for sample in self.train_data]
@@ -248,18 +261,38 @@ class Index:
 
         self.args.train_index_path = self.args.train_index_path.replace(".pt", "_all_neg_removed.pt")
         self.args.train_file = self.args.train_file.replace(".json", "_all_neg_removed.json")
-        self.save_all()
 
     def process_rm_all_neg(self):
         self.train_data = read_data(self.args.train_file)
         self.read_index(train=True, dev=False, empty=False)
         self.rm_all_neg()
+        self.save_all()
 
-def ensure_dir(file_path):
-    directory = os.path.dirname(file_path)
-    if not os.path.exists(directory):
-        print(f"Creating directory {directory}")
-        os.makedirs(directory)
+    def process_make_test_data_from_dev(self):
+        """
+        Randomly select 1000 data from dev data excluding the first 1000 data to create test data
+        """
+        if not os.path.exists(self.args.dev_index_path) or not os.path.exists(self.args.dev_file):
+            raise ValueError("Dev index or dev data does not exist. Cannot create test data from dev data")
+
+        cur_dev_size = 1000
+        self.dev_data = read_data(self.args.dev_file)
+        self.read_index(train=False, dev=True, empty=False)
+        if len(self.dev_data) <= cur_dev_size:
+            raise ValueError(f"Dev data size is less than {cur_dev_size}. Cannot create test data from dev data")
+
+        self.test_data = self.dev_data[cur_dev_size:]
+        self.dev_data = None
+        self.test_doc_embeddings = self.dev_doc_embeddings[cur_dev_size:]
+        self.dev_doc_embeddings = None
+        random.shuffle(self.test_data)
+
+        target_test_size = 1000
+        self.test_data = self.test_data[:target_test_size]
+        self.test_doc_embeddings = self.test_doc_embeddings[:target_test_size]
+        self.args.test_index_path = self.args.dev_index_path.replace(".pt", f"_{target_test_size}_as_test.pt")
+        self.args.test_file = self.args.dev_file.replace(".json", f".{target_test_size}-as-test.json")
+        self.save_all()
 
 if __name__ == '__main__':
     config_file = 'config/preprocess_idx.yaml'
@@ -276,10 +309,16 @@ if __name__ == '__main__':
 
     index = Index(args)
     if args.rm_all_neg:
-        if not args.on_train or args.on_dev or args.on_empty or args.extract or args.normalize:
+        print("Removing all negative data from training data")
+        if not args.on_train or args.on_dev or args.on_empty or args.extract or args.normalize or args.make_test_data_from_dev:
             raise ValueError("Keeping positive data should utilize train embeddings that are already done. Please set on_train to True; on_dev, on_empty, extract and normalize to False")
         print("Removing all negative data from training data")
         index.process_rm_all_neg()
+    elif args.make_test_data_from_dev:
+        print("Creating test data from dev data")
+        if not args.on_dev or args.on_train or args.on_empty or args.extract or args.normalize:
+            raise ValueError("Creating test data from dev data should utilize dev embeddings that are already done. Please set on_dev to True; on_train, on_empty, extract and normalize to False")
+        index.process_make_test_data_from_dev()
     else:
         print("Processing index")
         index.process_index_and_save()
