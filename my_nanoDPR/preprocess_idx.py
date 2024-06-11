@@ -2,7 +2,7 @@
 ## built-in
 import json,os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 import types, random
 
 os.environ["TOKENIZERS_PARALLELISM"]='true'
@@ -75,6 +75,8 @@ class Index:
         self.test_doc_embeddings = None
         self.empty_doc_embedding = None
         self.train_data = None
+        self.dev_data = None
+        self.test_data = None
 
     def create(self, train=False, dev=False, test=False, empty=False):
         """
