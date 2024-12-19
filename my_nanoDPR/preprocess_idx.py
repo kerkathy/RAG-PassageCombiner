@@ -2,7 +2,7 @@
 ## built-in
 import json,os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 import types, random
 
 os.environ["TOKENIZERS_PARALLELISM"]='true'
@@ -38,7 +38,7 @@ from utils import get_positive_docid
 def read_data(file):
     print(f"...Loading data from {file}...")
     data = json.load(open(file))
-    print(f"Finish! Size of train data: {len(data)}")
+    print(f"Finish! Size of data: {len(data)}")
     return data
 
 def create_corpus(data):
@@ -253,10 +253,12 @@ class Index:
         self.train_doc_embeddings = [self.train_doc_embeddings[i] for i in has_positive_data_idx]
         self.train_data = [
             {
+                "qid": i,
                 "question": self.train_data[i]["question"],
                 "answers": train_answers[i],
                 "ctxs": self.train_data[i]["ctxs"],
-                "all_pos_doc_ids": train_all_pos_doc_ids[i]
+                "level": self.train_data[i].get("level", None), # to track the difficulty level of HotpotQA
+                "all_pos_doc_ids": train_all_pos_doc_ids[i],
             }
             for i in has_positive_data_idx
         ]

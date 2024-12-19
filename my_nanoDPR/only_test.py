@@ -1,3 +1,6 @@
+"""
+Run evaluation for trained query encoder on test set using our framework.
+"""
 # %%
 ## built-in
 import time,random,queue,sys

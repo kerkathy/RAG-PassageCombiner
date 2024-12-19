@@ -156,7 +156,3 @@ def get_nq_exemplars(lm_name, num_docs, num_exemplars):
 
   return exemplars
   
-# %%
-# get_nq_exemplars("llama", 0, 2)[0]
-# len(get_nq_exemplars("llama", 0, 3))
-# # %%

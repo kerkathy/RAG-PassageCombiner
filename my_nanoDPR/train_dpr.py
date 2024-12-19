@@ -225,7 +225,7 @@ def inloop_extend_item(data, corpus, doc_embeddings, pos_doc_ids, ret_tokenizer,
     # convert doc_ids to docs
     for i in range(len(data)):
         query, docid_list, answer = data[i]
-        data[i] = (query, [corpus[docid] for docid in docid_list], answer, doc_embeddings[docid_list[-1]])
+        data[i] = (query, [corpus[docid] for docid in docid_list], answer, doc_embeddings[docid_list[-1]], docid_list)
 
     return data # List of tuples
 
@@ -253,8 +253,6 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
         question=x[0], documents=x[1], lm_name=lm_name, 
         num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
     answer_to_encode = [x[2][0] for x in samples] # pick the first answer for each question, as eval set may have multiple answers
-    # debug
-    # print(f"Real answer: {answer}")
 
     if "t5" in lm_name:
         # separate input_ids (send into encoder) and labels (send into decoder)
@@ -297,6 +295,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
     if mode == "eval":
         n_comb = prompt_ans_lm_inputs["input_ids"].shape[0] // num_orig_question
         res_dict["full_answers"] = [x[2] for i, x in enumerate(samples) if i % n_comb == 0] # list of list of str; len = num_orig_question
+        res_dict["docid_list"] = [x[4] for x in samples] # list of list of int; len = num_orig_question
         assert len(res_dict["full_answers"]) == num_orig_question, f"len(res_dict['full_answers']) ({len(res_dict['full_answers'])}) != num_orig_question ({num_orig_question})"
         if "llama" in lm_name.lower():
             res_dict["prompt_strs"] = prompt # list[str], len = num_orig_question * n_comb
@@ -315,6 +314,7 @@ def validate(
     total_ans_prob = 0
     num_batches = len(dev_dataloader)
     all_retriever_pick = []
+    all_pick_docids = []
     all_predictions = []
     total_num_correct = 0
     total_num_examples = 0
@@ -341,8 +341,8 @@ def validate(
         batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
         batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
     
-        logger.info(f"[validation step {step}/{num_batches}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
-        logger.info(f"[validation step {step}/{num_batches}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
+        # logger.info(f"[validation step {step}/{num_batches}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
+        # logger.info(f"[validation step {step}/{num_batches}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
         
         # %%
         with torch.no_grad():
@@ -373,14 +373,16 @@ def validate(
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
             num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
                 else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
+            n_comb = batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] // num_orig_question
+            logger.debug(f"n_comb: {n_comb}")
             retriever_cossim = retriever_cossim.view(num_orig_question, -1)
-            logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
             del query_embedding, doc_embedding
             torch.cuda.empty_cache()
             gc.collect()
-            logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             # %%
             if "t5" in args.lm_model:
@@ -416,7 +418,7 @@ def validate(
             else:
                 loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
             total_loss += loss.item()
-            logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
             # for each question, take idx of max retriever_cossim 
@@ -425,7 +427,7 @@ def validate(
             retrievers_pick = torch.argmax(retriever_cossim,dim=1) # [n_question]
 
             # # %%
-            # # ### debug
+            # # debug
             for i in range(min(3,num_orig_question)):
                 print(f"retriever_cossim: {retriever_cossim[i]}")
                 print(f"retriever's pick: {retrievers_pick[i]}")
@@ -463,6 +465,12 @@ def validate(
             total_ans_prob += lm_prob.sum().item() 
             # count how many retriever's pick is the same as lm's pick
             all_retriever_pick.extend(retrievers_pick.tolist())
+
+            # save the docid of retriever's pick
+            # say ith question's retriever's pick = j, then idx in docid_list = i * num_orig_question + j
+            all_pick_docids.extend([batch["docid_list"][i * n_comb + pick] for i, pick in enumerate(retrievers_pick.tolist())])
+            assert len(all_retriever_pick) == len(all_pick_docids), f"len(all_retriever_pick) ({len(all_retriever_pick)}) != len(all_pick_docids) ({len(all_pick_docids)})"
+
             retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
             del retriever_cossim, lm_prob
             torch.cuda.empty_cache()
@@ -473,8 +481,6 @@ def validate(
             # reshape batch['prompt_ans_lm_inputs'] to [n_question,n_comb,n_dim]
             # %%
             logger.debug(f'batch["prompt_ans_lm_inputs"]["input_ids"].shape: {batch["prompt_ans_lm_inputs"]["input_ids"].shape}')
-            n_comb = batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] // num_orig_question
-            logger.debug(f"n_comb: {n_comb}")
             batch['prompt_ans_lm_inputs'] = {
                 k: v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick] \
                 for k,v in batch['prompt_ans_lm_inputs'].items()
@@ -512,10 +518,10 @@ def validate(
             total_f1_score += batch_result["sum_f1"]
 
     # %%
-    # write retriever pick to train_step_logdir
+    # write retriever pick and its docid to file
     with open(os.path.join(train_step_logdir, "retriever_pick.txt"), "w") as f:
-        for pick in all_retriever_pick:
-            f.write(str(pick) + "\n")
+        for pick, docid in zip(all_retriever_pick, all_pick_docids):
+            f.write(f"{pick}\torig:{docid}\n")
     with open(os.path.join(train_step_logdir, "prediction.json"), "w", encoding='utf-8') as f:
         for item in all_predictions:
             f.write(item + "\n")
@@ -571,7 +577,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.dataset_name} {args.data_size}) ({args.has_positive_data_only} train_positive {args.most_positive_ans_only} most) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
+                f"(w/ id {args.dataset_name} {args.data_size}) ({args.has_positive_data_only} train_positive {args.most_positive_ans_only} most) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -598,6 +604,7 @@ def main():
                 f"empty_doc: {args.empty_doc}", f"weight_decay: {args.weight_decay}",
                 "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", 
                 f"only positive: {args.has_positive_data_only}", f"most positive ans: {args.most_positive_ans_only}",
+                "case study: with docid"
             ]
         else:
             # make sure current param is the same as the resumed one
@@ -713,7 +720,7 @@ def main():
     else:
         for split, path in index_path.items():
             if not os.path.exists(path):
-                raise ValueError(f"{split} Index file {path} not found. Please prepcoess_idx.py first.")
+                raise ValueError(f"{split} Index file {path} not found. Please preprocess_idx.py first.")
 
     # check if the norm is correct
     for split, emb_list in doc_embeddings.items():
