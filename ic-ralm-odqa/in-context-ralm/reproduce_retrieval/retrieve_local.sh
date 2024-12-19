@@ -1,6 +1,6 @@
 # Perform FAISS retrieval from existing local corpus (index) and convert to DPR retrieval run
 # for query dataset from either Pyserini or a local dataset.
-# Usage: bash generate_retrieval.sh <corpus_name> <dataset_type> <dataset_path_or_file> <dataset_name>
+# Usage: bash retrieve_local.sh <corpus_name> <dataset_type> <dataset_path_or_file> <dataset_name>
 
 set -e
 

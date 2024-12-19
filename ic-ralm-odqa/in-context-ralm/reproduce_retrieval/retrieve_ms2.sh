@@ -1,5 +1,5 @@
 # Perform BM25 retrieval (termed Lucene in Pyserini) on MSMARCO passage v2 index for the given dataset
-# cmd: bash generate_ms2_retrieval.sh <dataset_short_name>
+# cmd: bash retrieve_ms2.sh <dataset_short_name>
 
 set -e
 

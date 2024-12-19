@@ -1,6 +1,6 @@
 # Retrieval Tutorial
 
-This guide explains how to perform first-stage and second-stage retrieval using the Pyserini library. Depending on your use case (retrieving from a local index or the MSMARCOv2 index), you’ll use either `generate_local_retrieval.sh` or `generate_ms2_retrieval.sh`.
+This guide explains how to perform retrieval using the Pyserini library. Depending on your use case (retrieving from a local index or the MSMARCOv2 index), you’ll use either `retrieve_local.sh` or `retrieve_ms2.sh`.
 
 ## Why Pyserini?
 Pyserini simplifies retrieval by providing prebuilt indices. It eliminates the need for training your retrieval models, allowing you to focus on using and analyzing retrieval results. After obtaining retrieval results, you can enhance them by adding raw text and other metadata.
@@ -32,21 +32,29 @@ Pyserini simplifies retrieval by providing prebuilt indices. It eliminates the n
    export JAVA_HOME=/path/to/java/home
    ```
 
+3. **Input Dataset Format:**
+   The input dataset file should be a JSON file, which is a list of dictionaries. Each dictionary must have a key `"question"`, where the value is the query to be searched for. For example:
+   ```json
+   [
+       {"question": "What is the capital of France?", "other_key": "value"},
+       {"question": "Who won the first Nobel Prize in Physics?", "other_key": "value"}
+   ]
+   ```
 ---
 
 ## Workflow Overview
-1. **Local Index Retrieval:** Use `generate_local_retrieval.sh` for custom datasets and local FAISS indices.
-2. **MSMARCOv2 Index Retrieval:** Use `generate_ms2_retrieval.sh` for prebuilt MSMARCOv2 Lucene indices.
+1. **Local Index Retrieval:** Use `retrieve_local.sh` for custom datasets and local FAISS indices.
+2. **MSMARCOv2 Index Retrieval:** Use `retrieve_ms2.sh` for prebuilt MSMARCOv2 Lucene indices.
 
 ---
 
 ## Local Index Retrieval
 
-Use `generate_local_retrieval.sh` to retrieve results from a **local FAISS index** for custom datasets.
+Use `retrieve_local.sh` to retrieve results from a **local FAISS index** for custom datasets.
 
 ### Example Command:
 ```bash
-bash generate_local_retrieval.sh <corpus_name> <dataset_type> <dataset_path> <dataset_name>
+bash retrieve_local.sh <corpus_name> <dataset_type> <dataset_path> <dataset_name>
 ```
 
 ### Parameters:
@@ -57,7 +65,7 @@ bash generate_local_retrieval.sh <corpus_name> <dataset_type> <dataset_path> <da
 
 ### Example Usage:
 ```bash
-bash generate_local_retrieval.sh wiki local ../data/custom_dataset.json custom-dataset
+bash retrieve_local.sh wiki local ../data/custom_dataset.json custom-dataset
 ```
 
 This script:
@@ -69,11 +77,11 @@ This script:
 
 ## MSMARCOv2 Index Retrieval
 
-Use `generate_ms2_retrieval.sh` to retrieve results from the **MSMARCOv2 Lucene index**.
+Use `retrieve_ms2.sh` to retrieve results from the **MSMARCOv2 Lucene index**.
 
 ### Example Command:
 ```bash
-bash generate_ms2_retrieval.sh <dataset_short_name>
+bash retrieve_ms2.sh <dataset_short_name>
 ```
 
 ### Parameters:
@@ -81,7 +89,7 @@ bash generate_ms2_retrieval.sh <dataset_short_name>
 
 ### Example Usage:
 ```bash
-bash generate_ms2_retrieval.sh nq-test
+bash retrieve_ms2.sh nq-test
 ```
 
 This script:
