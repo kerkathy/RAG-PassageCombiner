@@ -1,5 +1,6 @@
-# Generate retrieval results for a CUSTOM dataset e.g. hotpot
-# set cuda device
+# Perform FAISS retrieval from existing corpus (index) and convert to DPR retrieval run 
+# for a custom dataset and corpus.
+# Usage: bash generate_custom_retrieval.sh <corpus_name>
 
 set -e
 export CUDA_VISIBLE_DEVICES=1

@@ -1,6 +1,6 @@
-# Generate retrieval on datasets **provided by Pyserini** e.g., nq, trivia-test
-# set cuda device
+# Perform FAISS retrieval on datasets **provided by Pyserini** e.g., nq, trivia-test
 # export CUDA_VISIBLE_DEVICES=5
+# Usage: bash generate_retrieval.sh <corpus_name>
 
 set -e
 
@@ -8,6 +8,7 @@ dataset_file=hotpot/intid_hotpot_dev_distractor_subset_topic.tsv
 dataset_name=hotpot-dev
 # dataset_name=nq-test
 # dataset_name=hotpotqa-dev
+
 corpus_name=wiki-web
 # corpus_name=web
 # corpus_name=wiki-web
