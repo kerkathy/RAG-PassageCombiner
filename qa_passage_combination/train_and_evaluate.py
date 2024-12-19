@@ -1,3 +1,9 @@
+"""
+Trains and evaluates a QA passage combination model.
+It includes functions for calculating various loss metrics, extending and collating data items,
+and validating the model's performance.
+"""
+
 # %%
 ## built-in
 import time,random,queue,sys
@@ -114,6 +120,7 @@ def calculate_nll_loss(
     prob_y_given_x = doc similarity score * answer probability
     NLL = -log(prob_y_given_x)
     """
+    # version 1.
     # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
     doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
     seq_logprobs = seq_probs.log()
@@ -121,6 +128,12 @@ def calculate_nll_loss(
     # if this isn't handled, loss will go to inf -> exploding gradient
     seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
     nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
+
+    # version 2. (Turns out to be the same as version 1.)
+    # doc_probs = nn.functional.softmax(doc_scores, dim=1)
+    # seq_logprobs[seq_logprobs == 0] = seq_logprobs[seq_logprobs != 0].min() # for numerical stability
+    # nll_loss = -(doc_probs * seq_probs).log().sum(dim=1).mean()
+
     if nll_loss.isnan():
         global logger
         logger.warning("nll_loss is nan!")
@@ -129,11 +142,12 @@ def calculate_nll_loss(
     return nll_loss
 
 class QADataset(torch.utils.data.Dataset):
-    def __init__(self, qa_pairs, all_corpus, all_doc_embeddings):
+    def __init__(self, qa_pairs, all_corpus, all_doc_embeddings, all_pos_doc_ids=None):
         self.qa_pairs = qa_pairs
         self.all_corpus = all_corpus
         self.all_doc_embeddings = all_doc_embeddings
-        
+        self.all_pos_doc_ids = all_pos_doc_ids
+    
     def __len__(self):
         return len(self.qa_pairs)
 
@@ -141,7 +155,8 @@ class QADataset(torch.utils.data.Dataset):
         data = [self.qa_pairs[idx]]  # each item is (query, all_doc, answer, last_doc_embedding, qid)
         corpus = self.all_corpus[idx]
         doc_embeddings = self.all_doc_embeddings[idx]
-        return {"data": data, "corpus": corpus, "doc_embeddings": doc_embeddings}
+        pos_doc_ids = self.all_pos_doc_ids[idx] if self.all_pos_doc_ids is not None else []
+        return {"data": data, "corpus": corpus, "doc_embeddings": doc_embeddings, "pos_doc_ids": pos_doc_ids}
     
     def collate_fn(self, samples):
         """
@@ -150,24 +165,31 @@ class QADataset(torch.utils.data.Dataset):
         return samples
 
 # this is like getitem, moved outside Dataset because we're using GPU here, and using GPU inside Dataset is not recommended
-# def inloop_getitem
-def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args):
+def inloop_extend_item(data, corpus, doc_embeddings, pos_doc_ids, ret_tokenizer, query_encoder, args, mode="train"):
     """
     Extend each item in data by retrieving top k documents for each round
-    into 1 + k + k^2 + ... + k^max_round items
+    into 1 + k + k^2 + ... + k^max_round - num_pos items
     data: List[tuple], each tuple is (query, all_doc, answer, last_doc_embedding)
     """
     global logger
-    # logger.debug("In inloop_getitem...")
-    embedding_device = data[0][3].device
 
     # Initialize pointers
     cur_visited = 0
     this_round_should_visited = 0
     next_round_should_visited = len(data)
 
+    if mode == "train":
+        # get top k positive doc ids
+        query, _, _ = data[0]
+        positive_embeddings = [doc_embeddings[i] for i in pos_doc_ids]
+        positive_embeddings = torch.stack(positive_embeddings, dim=0)
+        topk_positive_ids = retrieve_top_k_docid(query, positive_embeddings, ret_tokenizer, query_encoder, args.num_train_positive_docs, [])
+        topk_positive_ids = [pos_doc_ids[i] for i in topk_positive_ids]
+    else:
+        topk_positive_ids = []
+        
     for i_rnd in range(args.max_round):
-        # logger.debug(f"Round {i_rnd} has {next_round_should_visited} data to go thru...")
+        # logger.debug(f"[inloop_extend_item] Round {i_rnd} has {next_round_should_visited} data to go thru...")
         # Update pointers
         this_round_should_visited = next_round_should_visited
         next_round_should_visited = 0
@@ -175,35 +197,43 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
         # Process data from current round
         while cur_visited < this_round_should_visited:
             # Get current data
-            query, doc_list, answer, _ = data[cur_visited]
+            query, docid_list, answer = data[cur_visited]
             cur_visited += 1
 
-            # Retrieve top k documents
-            with torch.no_grad():
-                doc_ids = retrieve_top_k_docid(
-                    doc_list[-1] + " " + query, 
-                    doc_embeddings, 
-                    ret_tokenizer, 
-                    query_encoder, 
-                    args.k,
-                    ids_to_exclude=[],
-                )
-            # Append new data
-            for docid in doc_ids:
-                new_doc_list = doc_list + [corpus[docid]]
-                data.append((query, new_doc_list, answer, doc_embeddings[docid].to(embedding_device)))
+            # need to add positive doc, which is the highest scoring doc with answer string in it
+            doc_ids = retrieve_top_k_docid(
+                corpus[docid_list[-1]] + " " + query if docid_list[-1] != -1 else query,
+                doc_embeddings, 
+                ret_tokenizer, 
+                query_encoder, 
+                args.k - len(topk_positive_ids),
+                ids_to_exclude=docid_list+topk_positive_ids
+            )
+
+            # Append new data and positive data
+            for docid in doc_ids + topk_positive_ids:
+                new_docid_list = docid_list + [docid] if docid_list != [-1] else [docid]
+                # if all elements are same and len >1, then discard because this means it's all cetain positive doc
+                if len(set(new_docid_list)) == 1 and len(new_docid_list) > 1:
+                    continue
+                data.append((query, new_docid_list, answer))
 
                 # Increment next_pointer
                 next_round_should_visited += 1
 
-    # debug: temporarily remove empty document
     if not args.empty_doc:
         num_data_before_remove = len(data)
-        data = [x for x in data if x[1] != [""]]
+        data = [x for x in data if x[1] != [-1]]
         num_data_after_remove = len(data)
         assert num_data_before_remove == num_data_after_remove + 1, f"num_data_before_remove ({num_data_before_remove}) != num_data_after_remove + 1 ({num_data_after_remove + 1})"
 
-    return data  # List of tuples
+    # logger.debug(f"[inloop_extend_item] Extended data to size {len(data)}")
+    # convert doc_ids to docs
+    for i in range(len(data)):
+        query, docid_list, answer = data[i]
+        data[i] = (query, [corpus[docid] for docid in docid_list], answer, doc_embeddings[docid_list[-1]], docid_list)
+
+    return data # List of tuples
 
 # %%
 # this is like collate_fn, moved outside Dataset because getitem and collate_fn should be in the same scope
@@ -229,8 +259,6 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
         question=x[0], documents=x[1], lm_name=lm_name, 
         num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
     answer_to_encode = [x[2][0] for x in samples] # pick the first answer for each question, as eval set may have multiple answers
-    # debug
-    # print(f"Real answer: {answer}")
 
     if "t5" in lm_name:
         # separate input_ids (send into encoder) and labels (send into decoder)
@@ -273,6 +301,7 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
     if mode == "eval":
         n_comb = prompt_ans_lm_inputs["input_ids"].shape[0] // num_orig_question
         res_dict["full_answers"] = [x[2] for i, x in enumerate(samples) if i % n_comb == 0] # list of list of str; len = num_orig_question
+        res_dict["docid_list"] = [x[4] for x in samples] # list of list of int; len = num_orig_question
         assert len(res_dict["full_answers"]) == num_orig_question, f"len(res_dict['full_answers']) ({len(res_dict['full_answers'])}) != num_orig_question ({num_orig_question})"
         if "llama" in lm_name.lower():
             res_dict["prompt_strs"] = prompt # list[str], len = num_orig_question * n_comb
@@ -291,6 +320,7 @@ def validate(
     total_ans_prob = 0
     num_batches = len(dev_dataloader)
     all_retriever_pick = []
+    all_pick_docids = []
     all_predictions = []
     total_num_correct = 0
     total_num_examples = 0
@@ -304,8 +334,8 @@ def validate(
         # %%
         # make raw_batch into a extened batch by first extend each item and then collate_fn
         extended_batch = [inloop_extend_item(
-            data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-            ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+            data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"], pos_doc_ids=x["pos_doc_ids"],
+            ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args, mode="eval"
         ) for x in raw_batch]
         batch = inloop_collate_fn(
             samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
@@ -317,8 +347,8 @@ def validate(
         batch["query_inputs"] = {k: v.to(accelerator.device) for k,v in batch["query_inputs"].items()}
         batch["prompt_ans_lm_inputs"] = {k: v.to(accelerator.device) for k,v in batch["prompt_ans_lm_inputs"].items()}
     
-        logger.info(f"[validation step {step}/{num_batches}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
-        logger.info(f"[validation step {step}/{num_batches}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
+        # logger.info(f"[validation step {step}/{num_batches}] max_ret_token_len: {batch['query_inputs']['input_ids'].shape[1]}")
+        # logger.info(f"[validation step {step}/{num_batches}] max_lm_token_len: {batch['prompt_ans_lm_inputs']['input_ids'].shape[1]}")
         
         # %%
         with torch.no_grad():
@@ -349,14 +379,16 @@ def validate(
             retriever_cossim = torch.sum(query_embedding * doc_embedding, dim=1)  # [bs]
             num_orig_question = single_device_query_num // sum([args.k ** i for i in range(args.max_round + 1)]) if args.empty_doc \
                 else single_device_query_num // (sum([args.k ** i for i in range(args.max_round + 1)]) - 1)
+            n_comb = batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] // num_orig_question
+            logger.debug(f"n_comb: {n_comb}")
             retriever_cossim = retriever_cossim.view(num_orig_question, -1)
-            logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Got ret cos sim] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             query_embedding, doc_embedding = query_embedding.to("cpu"), doc_embedding.to("cpu")
             del query_embedding, doc_embedding
             torch.cuda.empty_cache()
             gc.collect()
-            logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Emptied embedding cache] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             # %%
             if "t5" in args.lm_model:
@@ -392,7 +424,7 @@ def validate(
             else:
                 loss = calculate_cross_entropy_loss(input_logits=retriever_cossim, target_logits=lm_prob, temperature=[args.ret_temperature, args.lm_temperature])
             total_loss += loss.item()
-            logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
+            # logger.info(f"[Got {args.loss_type} loss] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB")
 
             ## Metric 2. Average answer probability
             # for each question, take idx of max retriever_cossim 
@@ -401,7 +433,7 @@ def validate(
             retrievers_pick = torch.argmax(retriever_cossim,dim=1) # [n_question]
 
             # # %%
-            # # ### debug
+            # # debug
             for i in range(min(3,num_orig_question)):
                 print(f"retriever_cossim: {retriever_cossim[i]}")
                 print(f"retriever's pick: {retrievers_pick[i]}")
@@ -439,6 +471,12 @@ def validate(
             total_ans_prob += lm_prob.sum().item() 
             # count how many retriever's pick is the same as lm's pick
             all_retriever_pick.extend(retrievers_pick.tolist())
+
+            # save the docid of retriever's pick
+            # say ith question's retriever's pick = j, then idx in docid_list = i * num_orig_question + j
+            all_pick_docids.extend([batch["docid_list"][i * n_comb + pick] for i, pick in enumerate(retrievers_pick.tolist())])
+            assert len(all_retriever_pick) == len(all_pick_docids), f"len(all_retriever_pick) ({len(all_retriever_pick)}) != len(all_pick_docids) ({len(all_pick_docids)})"
+
             retriever_cossim, lm_prob = retriever_cossim.to("cpu"), lm_prob.to("cpu")
             del retriever_cossim, lm_prob
             torch.cuda.empty_cache()
@@ -449,8 +487,6 @@ def validate(
             # reshape batch['prompt_ans_lm_inputs'] to [n_question,n_comb,n_dim]
             # %%
             logger.debug(f'batch["prompt_ans_lm_inputs"]["input_ids"].shape: {batch["prompt_ans_lm_inputs"]["input_ids"].shape}')
-            n_comb = batch["prompt_ans_lm_inputs"]["input_ids"].shape[0] // num_orig_question
-            logger.debug(f"n_comb: {n_comb}")
             batch['prompt_ans_lm_inputs'] = {
                 k: v.view(num_orig_question, -1, v.shape[-1])[torch.arange(num_orig_question),retrievers_pick] \
                 for k,v in batch['prompt_ans_lm_inputs'].items()
@@ -488,10 +524,10 @@ def validate(
             total_f1_score += batch_result["sum_f1"]
 
     # %%
-    # write retriever pick to train_step_logdir
+    # write retriever pick and its docid to file
     with open(os.path.join(train_step_logdir, "retriever_pick.txt"), "w") as f:
-        for pick in all_retriever_pick:
-            f.write(str(pick) + "\n")
+        for pick, docid in zip(all_retriever_pick, all_pick_docids):
+            f.write(f"{pick}\torig:{docid}\n")
     with open(os.path.join(train_step_logdir, "prediction.json"), "w", encoding='utf-8') as f:
         for item in all_predictions:
             f.write(item + "\n")
@@ -514,8 +550,8 @@ def validate(
 def main():
     # %%
     args = parse_args()
-    if args.has_positive_data_only is True:
-        raise NotImplementedError("has_positive_data_only must be False. If you want to use only positive data, please run train_dpr.py")
+    if args.has_positive_data_only is False:
+        raise NotImplementedError("has_positive_data_only must be True. If you want to use negative data, please run train_and_evaluate_with_negatives.py")
     set_seed(args.seed)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(
@@ -547,7 +583,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"({args.dataset_name} {args.data_size}) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
+                f"(w/ id {args.dataset_name} {args.data_size}) ({args.has_positive_data_only} train_positive {args.most_positive_ans_only} most) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -572,7 +608,9 @@ def main():
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
                 f"empty_doc: {args.empty_doc}", f"weight_decay: {args.weight_decay}",
-                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", f"only positive: {args.has_positive_data_only}",
+                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", 
+                f"only positive: {args.has_positive_data_only}", f"most positive ans: {args.most_positive_ans_only}",
+                "case study: with docid"
             ]
         else:
             # make sure current param is the same as the resumed one
@@ -634,14 +672,21 @@ def main():
             train_size, dev_size = 87622, 1000
         elif args.dataset_name == "hotpot":
             train_size, dev_size = 90447, 1000
-        else: 
+        else:
             raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.train_file = args.train_file.replace(".json", f".size-{train_size}.json")
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
-    if args.has_positive_data_only:
-        raise NotImplementedError("This file is for NO positive data!!")
+    logger.info("...Remove negative documents from train data...")
+    if args.most_positive_ans_only:
+        # hoose the most positive answer
+        args.train_file = args.train_file.replace(".json", f"_all_neg_removed.json")
+        logger.info(f"train_file: {args.train_file}")
+    else:
+        # choose the first answer
+        args.train_file = args.train_file.replace(".json", f"_not_most_pos_all_neg_removed.json")
+        logger.info(f"train_file: {args.train_file}")
 
     logger.info("...Loading data...")
     # skip data used as exemplars
@@ -662,6 +707,12 @@ def main():
         "dev": os.path.join(index_dir, f"dev_{dev_size}_norm.pt"),
         "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
+    if args.most_positive_ans_only:
+        logger.info("...Remove negative documents from train index...")
+        index_path["train"] = index_path["train"].replace(".pt", "_all_neg_removed.pt")
+    else:
+        logger.info("...Remove negative documents from train index...")
+        index_path["train"] = index_path["train"].replace(".pt", "_not_most_pos_all_neg_removed.pt")
 
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 
@@ -675,7 +726,7 @@ def main():
     else:
         for split, path in index_path.items():
             if not os.path.exists(path):
-                raise ValueError(f"{split} Index file {path} not found. Please prepcoess_idx.py first.")
+                raise ValueError(f"{split} Index file {path} not found. Please preprocess_idx.py first.")
 
     # check if the norm is correct
     for split, emb_list in doc_embeddings.items():
@@ -694,12 +745,12 @@ def main():
     doc_embeddings['dev'] = doc_embeddings['dev'][args.num_exemplars:]
 
     # TODO add feature of empty doc representation
-
-    # Answer is a LIST instead of a str
-    # In train set, only select one answer for each question
-    # In dev set, keep track of full answer list of each question
-    train_qa_pairs = [(normalize_query(sample['question']), [""], [sample['answers'][0]], doc_embeddings['empty_doc']) for sample in train_data]
-    dev_qa_pairs = [(normalize_query(sample['question']), [""], sample['answers'], doc_embeddings['empty_doc']) for sample in dev_data]
+    
+    # TODO update data tuple format, from doc list to docid list
+    # convert to (query, docid_list, answer)
+    # take each answer as a data point, not only answer[0]
+    train_qa_pairs = [(normalize_query(sample['question']), [-1], [sample['answers'][0]]) for sample in train_data]
+    dev_qa_pairs = [(normalize_query(sample['question']), [-1], sample['answers']) for sample in dev_data]
 
     logger.info(f"len(train_qa_pairs): {len(train_qa_pairs)}")
     logger.info(f"len(dev_qa_pairs): {len(dev_qa_pairs)}")
@@ -708,10 +759,17 @@ def main():
     logger.info(f"len(doc_embeddings['train']): {len(doc_embeddings['train'])}")
     logger.info(f"len(doc_embeddings['dev']): {len(doc_embeddings['dev'])}")
 
+    # get positive doc ids for each question and save result
+    train_all_pos_doc_ids = [sample["all_pos_doc_ids"] for sample in train_data]
+    logger.info(f"[Filtered positive docs] len(train_qa_pairs): {len(train_qa_pairs)}")
+    logger.info(f"[Filtered positive docs] len(train_corpus): {len(train_corpus)}")
+    logger.info(f"[Filtered positive docs] len(doc_embeddings['train']): {len(doc_embeddings['train'])}")
+    logger.info(f"[Filtered positive docs] len(train_all_pos_doc_ids): {len(train_all_pos_doc_ids)}")
+
     logger.info("...Build Dataset & Dataloader...")
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
-    train_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train'])
+    train_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train'], train_all_pos_doc_ids)
     dev_dataset = QADataset(dev_qa_pairs, dev_corpus, doc_embeddings['dev'])
     
     logger.info("...Deleting train_data and dev_data...")
@@ -802,8 +860,8 @@ def main():
             # make raw_batch into a extened batch
             # by first extend each item and then collate_fn
             extended_batch = [inloop_extend_item(
-                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"],
-                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args
+                data=x["data"], corpus=x["corpus"], doc_embeddings=x["doc_embeddings"], pos_doc_ids=x["pos_doc_ids"],
+                ret_tokenizer=query_tokenizer, query_encoder=query_encoder, args=args, mode="train"
             ) for x in raw_batch]
             batch = inloop_collate_fn(
                 samples=extended_batch, ret_tokenizer=query_tokenizer, lm_tokenizer=lm_tokenizer, 
@@ -966,6 +1024,8 @@ def main():
                 logger.info(f"[Finish step {step} in epoch {epoch} (globally {completed_steps})] GPU memory used: {torch.cuda.memory_allocated() / 1e6} MB.  Current Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")
     
     if accelerator.is_local_main_process:
+        logger.info(f"Filtered training data size: {len(train_dataset)}")
+        logger.info(f"dev data size: {len(dev_dataset)}")
         logger.info(f"max_ret_token_len: {max_ret_token_len}; max_lm_token_len: {max_lm_token_len}")
         logger.info(f"Time spent: {time.time() - start_time} seconds")
         logger.info(f"Max GPU memory used: {torch.cuda.max_memory_allocated() / 1e6} MB")

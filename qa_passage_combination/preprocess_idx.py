@@ -1,4 +1,11 @@
 # %%
+"""
+Preprocesses QA passage data by creating, reading, normalizing, and saving document embeddings 
+using either a DPR or BERT model. 
+Also includes functionality to remove all negative samples from the training data. 
+To use this script, configure the parameters in the 'config/tmp_preprocess_2.yaml' file and run the script.
+cmd: `python preprocess.py`
+"""
 ## built-in
 import json,os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

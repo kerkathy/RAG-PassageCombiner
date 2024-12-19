@@ -1,9 +1,8 @@
-# %%
 """
-In this file, a part of training data is used for evaluation, 
-to test the model's fitness.
+Similar to train_and_evaluate.py, but with additional handling for negative examples during data processing and training.
 """
 
+# %%
 ## built-in
 import time,random,queue,sys
 import math,logging,json,random,os,psutil
@@ -32,13 +31,11 @@ from utils import (
     set_seed,
     get_linear_scheduler,
     normalize_query,
-    make_index,
     retrieve_top_k_docid,
     load_lm_model_and_tokenizer,
     get_lm_prob,
     get_t5_lm_prob,
     lm_gen_and_check,
-    load_doc_encoder_and_tokenizer,
     load_query_encoder_and_tokenizer,
     make_prompt,
 )
@@ -61,7 +58,7 @@ def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
     ## adding args here for more control from CLI is possible
-    parser.add_argument("--config_file",default='config/train_dpr_nq.yaml')
+    parser.add_argument("--config_file",default='config/24G_train_dpr_nq.yaml')
     args = parser.parse_args()
     args_dict = {k:v for k,v in vars(args).items() if v is not None}
     yaml_config = get_yaml_file(args.config_file)
@@ -121,7 +118,6 @@ def calculate_nll_loss(
     prob_y_given_x = doc similarity score * answer probability
     NLL = -log(prob_y_given_x)
     """
-    # version 1.
     # ref: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/rag/modeling_rag.py#L1057
     doc_logprobs = nn.functional.log_softmax(doc_scores, dim=1)
     seq_logprobs = seq_probs.log()
@@ -129,12 +125,6 @@ def calculate_nll_loss(
     # if this isn't handled, loss will go to inf -> exploding gradient
     seq_logprobs[seq_logprobs == float("-inf")] = torch.finfo(seq_logprobs.dtype).min
     nll_loss = -(doc_logprobs + seq_logprobs).logsumexp(dim=1).mean()
-
-    # version 2. (Turns out to be the same as version 1.)
-    # doc_probs = nn.functional.softmax(doc_scores, dim=1)
-    # seq_logprobs[seq_logprobs == 0] = seq_logprobs[seq_logprobs != 0].min() # for numerical stability
-    # nll_loss = -(doc_probs * seq_probs).log().sum(dim=1).mean()
-
     if nll_loss.isnan():
         global logger
         logger.warning("nll_loss is nan!")
@@ -164,7 +154,6 @@ class QADataset(torch.utils.data.Dataset):
         return samples
 
 # this is like getitem, moved outside Dataset because we're using GPU here, and using GPU inside Dataset is not recommended
-# def inloop_getitem
 def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encoder, args):
     """
     Extend each item in data by retrieving top k documents for each round
@@ -172,7 +161,6 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
     data: List[tuple], each tuple is (query, all_doc, answer, last_doc_embedding)
     """
     global logger
-    # logger.debug("In inloop_getitem...")
     embedding_device = data[0][3].device
 
     # Initialize pointers
@@ -194,7 +182,14 @@ def inloop_extend_item(data, corpus, doc_embeddings, ret_tokenizer, query_encode
 
             # Retrieve top k documents
             with torch.no_grad():
-                doc_ids = retrieve_top_k_docid(doc_list[-1] + " " + query, doc_embeddings, ret_tokenizer, query_encoder, args.k)
+                doc_ids = retrieve_top_k_docid(
+                    doc_list[-1] + " " + query, 
+                    doc_embeddings, 
+                    ret_tokenizer, 
+                    query_encoder, 
+                    args.k,
+                    ids_to_exclude=[],
+                )
             # Append new data
             for docid in doc_ids:
                 new_doc_list = doc_list + [corpus[docid]]
@@ -521,6 +516,8 @@ def validate(
 def main():
     # %%
     args = parse_args()
+    if args.has_positive_data_only is True:
+        raise NotImplementedError("has_positive_data_only must be False. If you want to use only positive data, please run train_and_evaluate.py")
     set_seed(args.seed)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(
@@ -552,7 +549,7 @@ def main():
             project_name="dpr", 
             config=args,
             init_kwargs={"wandb":{"name":
-                f"(test-fit) ({args.dataset_name} {args.data_size}) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty) "}}
+                f"({args.dataset_name} {args.data_size}) (wd {args.weight_decay} lr {args.lr} warmup {args.warmup_steps}) {model_short_name}-{args.max_round}round-{args.loss_type}-{args.k}k-bs({args.per_device_train_batch_size}&{args.per_device_eval_batch_size})({args.train_llm_batch_size}&{args.eval_llm_batch_size}) {args.max_train_epochs}ep doc({args.doc_encoder_type}) query({args.query_encoder_type}) ({args.empty_doc} empty)"}}
         )
     # %%
     if not debug and accelerator.is_local_main_process:
@@ -560,7 +557,7 @@ def main():
         LOG_DIR = wandb_tracker.run.dir
         if args.sweep:
             # exit if folder already exists
-            CKPT_DIR = os.path.join(args.ckpt_dir, f"test-fit-lr-{args.lr}")
+            CKPT_DIR = os.path.join(args.ckpt_dir, f"train-lr-{args.lr}")
             if os.path.exists(CKPT_DIR):
                 logger.info(f"CKPT_DIR {CKPT_DIR} already exists, exit successfully.")
                 return
@@ -577,7 +574,7 @@ def main():
                 f"train_bs: {args.per_device_train_batch_size}", f"eval_bs: {args.per_device_eval_batch_size}",
                 f"temp: {args.ret_temperature}&{args.lm_temperature}","newline_format_prompt", "train", 
                 f"empty_doc: {args.empty_doc}", f"weight_decay: {args.weight_decay}",
-                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm"
+                "cossim_ret_score (correct)", "fix loss nan", "add grad_norm", f"only positive: {args.has_positive_data_only}",
             ]
         else:
             # make sure current param is the same as the resumed one
@@ -624,17 +621,34 @@ def main():
     elif args.data_size == "1/10":
         train_size, dev_size = 10000, 1000
     elif args.data_size == "full":
-        train_size, dev_size = 79168, 8757
+        if args.dataset_name == "nq":
+            train_size, dev_size = 79168, 8757
+        elif args.dataset_name == "trivia":
+            train_size, dev_size = 87622, 11313
+        elif args.dataset_name == "hotpot":
+            train_size, dev_size = 90447, 7405
+        else: 
+            raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
+    elif args.data_size == "full_train_part_dev":
+        if args.dataset_name == "nq":
+            train_size, dev_size = 79168, 1000
+        elif args.dataset_name == "trivia":
+            train_size, dev_size = 87622, 1000
+        elif args.dataset_name == "hotpot":
+            train_size, dev_size = 90447, 1000
+        else: 
+            raise ValueError(f"Invalid dataset_name: {args.dataset_name}")
     else:
         raise ValueError(f"Invalid data_size: {args.data_size}")
     args.train_file = args.train_file.replace(".json", f".size-{train_size}.json")
     args.dev_file = args.dev_file.replace(".json", f".size-{dev_size}.json")
+    if args.has_positive_data_only:
+        raise NotImplementedError("This file is for NO positive data!!")
 
     logger.info("...Loading data...")
     # skip data used as exemplars
     train_data = json.load(open(os.path.join(args.train_dir, args.train_file)))
-    dev_data = train_data[:dev_size]
-    # dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
+    dev_data = json.load(open(os.path.join(args.dev_dir, args.dev_file)))
     logger.info(f"Size of train data: {len(train_data)}")
     logger.info(f"Size of dev data: {len(dev_data)}")
 
@@ -647,16 +661,17 @@ def main():
     index_dir = os.path.join(args.base_index_dir, args.doc_encoder_type)
     index_path = {
         "train": os.path.join(index_dir, f"train_{train_size}_norm.pt"),
+        "dev": os.path.join(index_dir, f"dev_{dev_size}_norm.pt"),
         "empty_doc": os.path.join(index_dir, "empty_doc_norm.pt")
     }
-    
+
     if all([os.path.exists(path) for path in index_path.values()]):
         logger.info(f"...Loading index from {index_path.values()}...") 
         doc_embeddings = {
             "train": torch.load(index_path["train"]),
+            "dev": torch.load(index_path["dev"]),
             "empty_doc": torch.load(index_path["empty_doc"])
         }
-        doc_embeddings["dev"] = doc_embeddings["train"][:dev_size]
         assert len(doc_embeddings['train']) == len(train_corpus), f"len(doc_embeddings['train']) ({len(doc_embeddings['train'])}) != len(train_corpus), ({len(train_corpus)})"
         assert len(doc_embeddings['dev']) == len(dev_corpus), f"len(doc_embeddings['dev']) ({len(doc_embeddings['dev'])}) != len(dev_corpus), ({len(dev_corpus)})"
     else:
@@ -680,12 +695,6 @@ def main():
     doc_embeddings['train'] = doc_embeddings['train'][args.num_exemplars:]
     doc_embeddings['dev'] = doc_embeddings['dev'][args.num_exemplars:]
 
-    # [experiment-2] take only 10 documents per question
-    print(f"--- Doing experiment-2: take only 10 documents per question ---")
-    train_corpus = [x[:10] for x in train_corpus]
-    dev_corpus = [x[:10] for x in dev_corpus]
-    doc_embeddings['train'] = [x[:10] for x in doc_embeddings['train']]
-    doc_embeddings['dev'] = [x[:10] for x in doc_embeddings['dev']]
     # TODO add feature of empty doc representation
 
     # Answer is a LIST instead of a str
@@ -705,11 +714,11 @@ def main():
     query_encoder = accelerator.prepare(query_encoder)
     logger.info(f"query_encoder is on {query_encoder.device}")
     train_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train'])
-    dev_dataset = QADataset(train_qa_pairs, train_corpus, doc_embeddings['train']) # temp fix!! Debug why dev loss is diff from train los
-    # dev_dataset = QADataset(dev_qa_pairs, dev_corpus, doc_embeddings['dev'])
+    dev_dataset = QADataset(dev_qa_pairs, dev_corpus, doc_embeddings['dev'])
     
     logger.info("...Deleting train_data and dev_data...")
     del train_data, dev_data
+    gc.collect()
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=args.per_device_train_batch_size,shuffle=True,collate_fn=train_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
     dev_dataloader = torch.utils.data.DataLoader(dev_dataset,batch_size=args.per_device_eval_batch_size,shuffle=False,collate_fn=dev_dataset.collate_fn,num_workers=args.num_workers,pin_memory=args.pin_memory)
@@ -739,6 +748,8 @@ def main():
     MAX_TRAIN_EPOCHS = math.ceil(MAX_TRAIN_STEPS / NUM_UPDATES_PER_EPOCH)
     TOTAL_TRAIN_BATCH_SIZE = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     EVAL_STEPS = args.val_check_interval if isinstance(args.val_check_interval,int) else int(args.val_check_interval * NUM_UPDATES_PER_EPOCH)
+    if EVAL_STEPS == 0:
+        raise ValueError("EVAL_STEPS is 0, please set val_check_interval larger.")
     if isinstance(args.warmup_steps, float):
         args.warmup_steps = int(args.warmup_steps * MAX_TRAIN_STEPS)
         logger.info(f"Converted warmup_steps to {args.warmup_steps}")

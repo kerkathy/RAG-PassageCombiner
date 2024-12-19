@@ -10,6 +10,6 @@ do
     
     accelerate launch \
         --gpu_ids 2 \
-        only_eval.py \
+        evaluate_on_validation.py \
         --config_file "config/test_dpr_${dataset}_eval.yaml"
 done

@@ -9,6 +9,6 @@ for dataset in nq trivia hotpot; do
 
     accelerate launch \
         --gpu_ids 2 \
-        only_eval_rerank.py \
+        evaluate_on_reranked_validation.py \
         --config_file $config_file
 done

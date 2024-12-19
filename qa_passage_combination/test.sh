@@ -4,5 +4,5 @@
 dataset=nq
 accelerate launch \
     --gpu_ids 2 \
-    only_test.py \
+    evaluate_on_test.py \
     --config_file "config/test_dpr_${dataset}.yaml"

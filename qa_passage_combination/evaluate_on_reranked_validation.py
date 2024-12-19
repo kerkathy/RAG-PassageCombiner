@@ -185,8 +185,6 @@ def inloop_collate_fn(samples, ret_tokenizer, lm_tokenizer, lm_name, args, mode=
         question=x[0], documents=x[1], lm_name=lm_name, 
         num_exemplars=args.num_exemplars, dataset=args.dataset_name) for x in samples]
     answer_to_encode = [x[2][0] for x in samples] # pick the first answer for each question, as eval set may have multiple answers
-    # logger.debug(f"[inloop_collate_fn] prompt: {prompt[0]}")
-    # logger.debug(f"[inloop_collate_fn] should have {len(samples[0][1])} documents in prompt")
 
     if "t5" in lm_name:
         # separate input_ids (send into encoder) and labels (send into decoder)

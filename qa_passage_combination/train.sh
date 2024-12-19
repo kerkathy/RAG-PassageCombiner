@@ -11,5 +11,5 @@
 dataset=nq
 accelerate launch \
     --gpu_ids 0 \
-    train_dpr.py \
+    train_and_evaluate.py \
     --config_file "config/dpr_${dataset}.yaml"
