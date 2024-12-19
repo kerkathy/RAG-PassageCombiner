@@ -1,5 +1,8 @@
 # My data
 *.jsonl
+ic-ralm-odqa/in-context-ralm/data
+cache/
+analyze/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

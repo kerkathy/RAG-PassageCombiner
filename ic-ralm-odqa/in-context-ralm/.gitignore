@@ -2,3 +2,4 @@ cache/
 log/
 output*/
 data/*/*.json
+flan_output*/
