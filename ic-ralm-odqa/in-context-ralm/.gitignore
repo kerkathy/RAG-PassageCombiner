@@ -3,3 +3,5 @@ log/
 output*/
 data/*/*.json
 flan_output*/
+reproduce_retrieval/result/
+reproduce_retrieval/archive/

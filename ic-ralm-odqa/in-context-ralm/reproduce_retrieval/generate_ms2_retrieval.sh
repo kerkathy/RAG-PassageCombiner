@@ -35,7 +35,7 @@ for dataset_short_name in $1; do
     formatted_output_file=result/${dataset_short_name}/formatted-${corpus_name}.${dataset_short_name}.hits-100.json
 
     case $dataset_short_name in
-        "nq-train"|"nq-dev"|"trivia-train"|"trivia-dev"|"hotpot-train"|"hotpot"|"msmarcoqa"|"eli5"|"strategyQA"|"AmbigQA")
+        "nq-train"|"nq-dev"|"trivia-train"|"trivia-dev"|"hotpot-train"|"hotpot"|"msmarcoqa"|"eli5"|"strategyQA"|"AmbigQA"|"complexWQ-train"|"complexWQ-dev"|"hotpot-multionly")
             data_dir=/home/guest/r11944026/research/ic-ralm-odqa/in-context-ralm/data
 
             case $dataset_short_name in
@@ -51,11 +51,20 @@ for dataset_short_name in $1; do
                 "trivia-dev")
                     dataset_path=${data_dir}/trivia/trivia-dev_format.json
                     ;;
+                "complexWQ-train")
+                    dataset_path=${data_dir}/complexWQ/format_train_27639.json
+                    ;;
+                "complexWQ-dev")
+                    dataset_path=${data_dir}/complexWQ/format_dev_3519.json
+                    ;;
                 "hotpot-train")
                     dataset_path=${data_dir}/hotpot/hotpot_train_format.json
                     ;;
+                "hotpot-multionly")
+                    dataset_path=${data_dir}/hotpot/hotpot_train_only_multi_format.json
+                    ;;
                 "hotpot")
-                    dataset_path=${data_dir}/${dataset_short_name}/hotpot_dev_dpr_format.json
+                    dataset_path=${data_dir}/hotpot/hotpot_dev_dpr_format.json
                     ;;
                 "msmarcoqa")
                     dataset_path=${data_dir}/msmarco-qa/MSMARCO-Question-Answering/Data/train_v2.1_nlgen-subset-12467.json

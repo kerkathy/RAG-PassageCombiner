@@ -7,12 +7,13 @@ import sys
 
 def main():
     if len(sys.argv) != 4:
-        print("Usage: python extract_json.py <size_of_subset> <input_file> <output_file>")
+        print("Usage: python extract_json.py <size_of_subset> <input_file> <output_file> <start_idx>")
         sys.exit(1)
 
     output_size = int(sys.argv[1])
     input_file = sys.argv[2]
     output_file = sys.argv[3]
+    start_idx = sys.argv[4] # Optional, where to start slicing
 
     with open(input_file, 'r') as f:
         data = json.load(f)
@@ -20,7 +21,7 @@ def main():
     # Check if data is a list and then slice it
     if isinstance(data, list):
         print(f"There are {len(data)} items in the list.")
-        data = data[:output_size]
+        data = data[start_idx:start_idx+output_size]
     else:
         print("JSON data is not a list and cannot be sliced.")
         print(f"The first {output_size} Keys: {list(data.keys())[0:output_size]}")
