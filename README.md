@@ -1,29 +1,43 @@
-# Multi-document Retrieval
-## Objective
-In this repo, we train a model to find a optimal permutation of documents for a given question.
-The retriever consist of two BERT encoder, one for question and the other for context. The former is trainable while the latter is fixed.
+# RAG with Passage Combination
 
-## Preparation
-- `train.json`: Multiple (question, answer) pairs
-- `ctx.json`: Raw documents, (id, text) pairs
-- `encoded_ctx.json`: Document embeddings, (id, embedding) pairs. Or faiss index
-    <!-- - Should be updated every 3k steps -->
+This repository provides tools and scripts to run retrieval and train a model to retrieve passage combinations that helps downstream retrieval-augmented QA the most. A baseline is also provided by simply retrieving and taking the top k passages.
 
-## Training
-```
-python train.py \
-    --train_datasets <train_file>
-    --eval_datasets <eval_file>
-    --output_dir <path to ckpts>
-    --ctx <path to raw doc>
-    --pretrained_q_enc <path to pretrained doc encoder ckpt>
-    --pretrained_ctx_enc <path to pretrained doc encoder ckpt>
-```
+## Usage
+
+1. **Run Retrieval**: 
+   - Use the provided scripts indicated in [retrieval README](retrieval/README.md) to run the retrieval process. This step involves generating representation vectors for the static documents dataset and retrieving the best matching passages given the query vectors.
+
+2. **Train Model**:
+   - Train a model to retrieve passage combinations using the provided `.sh` files.
+   ```bash
+   bash qa_passage_combination/train_and_evaluate.sh
+   ```
+
+3. **Evaluate Model**:
+   - Evaluate the trained model using the provided `.sh` files.
+   ```bash
+   bash qa_passage_combination/test.sh
+   ```
+
+4. **Baseline**:
+   - A baseline is provided by simply retrieving and taking the top k passages. This can be used as a reference to compare the performance of your trained model.
+   ```bash
+   bash qa_baseline/rerank.sh
+   bash qa_baseline/run_qa_all.sh
+   ```
+
+## Acknowledgement
+
+This project is based on and inspired by the work and code from the following repositories:
+
+1. [Hannibal046/nanoDPR](https://github.com/Hannibal046/nanoDPR)
+2. [castorini/pyserini](https://github.com/castorini/pyserini)
+3. [AI21Labs/in-context-ralm](https://github.com/AI21Labs/in-context-ralm)
+4. [StonyBrookNLP/ircot](https://github.com/StonyBrookNLP/ircot)
+
+We thank the authors of these repositories for their contributions to the community.
 
 
+## License
 
-## Evaluation
-
-
-## Inference
-
+This project is licensed under the MIT License.
